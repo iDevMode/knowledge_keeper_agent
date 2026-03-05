@@ -1,3 +1,4 @@
+import os
 import sys
 
 from pydantic_settings import BaseSettings
@@ -27,7 +28,21 @@ class Settings(BaseSettings):
     # Port (for deployment platforms like Railway)
     port: int = 8321
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "case_sensitive": False}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False,
+    }
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Fallback: read directly from os.environ if pydantic-settings missed them
+        # This handles deployment platforms where env var injection timing varies
+        for field_name in self.model_fields:
+            env_name = field_name.upper()
+            env_val = os.environ.get(env_name)
+            if env_val and not getattr(self, field_name, None):
+                object.__setattr__(self, field_name, env_val)
 
     def validate_for_production(self) -> None:
         """Check critical settings are configured. Call at startup."""
