@@ -216,6 +216,18 @@ def _run_generation_in_background(
 
 # ---- Endpoints ----
 
+@app.get("/api/health")
+def health_check():
+    key = settings.anthropic_api_key
+    return {
+        "status": "ok",
+        "api_key_set": bool(key),
+        "api_key_preview": f"{key[:12]}..." if key else "(empty)",
+        "environment": settings.environment,
+        "allowed_origins": settings.allowed_origins,
+    }
+
+
 @app.post("/api/sessions/stage1", response_model=SessionCreatedResponse)
 def create_stage1():
     store = get_session_store()
