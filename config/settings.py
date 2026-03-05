@@ -27,10 +27,12 @@ class Settings(BaseSettings):
     # Port (for deployment platforms like Railway)
     port: int = 8321
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "case_sensitive": False}
 
     def validate_for_production(self) -> None:
         """Check critical settings are configured. Call at startup."""
+        key_preview = f"{self.anthropic_api_key[:8]}..." if self.anthropic_api_key else "(empty)"
+        print(f"[STARTUP] environment={self.environment} api_key={key_preview} origins={self.allowed_origins}", file=sys.stderr)
         errors = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY is not set")
