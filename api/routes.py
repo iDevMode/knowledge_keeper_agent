@@ -218,13 +218,19 @@ def _run_generation_in_background(
 
 @app.get("/api/health")
 def health_check():
+    import os
     key = settings.anthropic_api_key
+    raw_key = os.environ.get("ANTHROPIC_API_KEY", "(not in os.environ)")
     return {
         "status": "ok",
         "api_key_set": bool(key),
         "api_key_preview": f"{key[:12]}..." if key else "(empty)",
+        "raw_env_key_preview": f"{raw_key[:12]}..." if raw_key and raw_key != "(not in os.environ)" else raw_key,
         "environment": settings.environment,
+        "raw_env_environment": os.environ.get("ENVIRONMENT", "(not in os.environ)"),
         "allowed_origins": settings.allowed_origins,
+        "raw_env_origins": os.environ.get("ALLOWED_ORIGINS", "(not in os.environ)"),
+        "all_env_keys_with_ant": [k for k in os.environ.keys() if "ANT" in k.upper() or "API" in k.upper()],
     }
 
 
