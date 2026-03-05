@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { generateDocument, getDownloadUrl } from '../api/client'
+import { generateDocument } from '../api/client'
 
 function CheckmarkIcon() {
   return (
@@ -80,7 +80,7 @@ function Stage2Complete({ sessionId }) {
     setError(null)
     try {
       const data = await generateDocument(sessionId, format)
-      setDownloadUrl(getDownloadUrl(data.document_id))
+      setDownloadUrl(data.download_url)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -135,7 +135,7 @@ function Stage2Complete({ sessionId }) {
       ) : (
         <a
           href={downloadUrl}
-          download
+          download={`KnowledgeKeeper-Handover.${format === 'pdf' ? 'pdf' : 'md'}`}
           className="block w-full py-3 rounded-xl bg-keeper-500 text-white font-medium text-center hover:bg-keeper-400 transition-colors"
         >
           Download {format.toUpperCase()}

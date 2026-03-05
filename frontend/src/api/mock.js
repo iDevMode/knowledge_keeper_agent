@@ -233,15 +233,151 @@ export async function getSessionStatus(sessionId) {
   }
 }
 
+// ── Mock document content ────────────────────────────────────────────────────
+
+const MOCK_DOCUMENT_MARKDOWN = `# KnowledgeKeeper — Handover Document
+
+**Employee:** Senior Operations Manager
+**Department:** Operations
+**Company:** Acme Corp
+**Generated:** ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}
+
+---
+
+## Section 1: Role Overview
+
+The Senior Operations Manager role sits within a team of 8 in the Operations department, reporting directly to the VP Operations with 3 direct reports. The role has been held for 4 years and is classified as a mixed role encompassing process management, decision-making, and relationship management.
+
+### Key Responsibilities
+- Ownership of the monthly reconciliation process end-to-end
+- Client escalation management and resolution
+- Oversight of quarterly reporting cycles
+- Management of banking partner relationships
+- Team coordination across 3 direct reports
+
+---
+
+## Section 2: Risk Summary
+
+| # | Risk Flag | Severity | Description | Recommended Action |
+|---|-----------|----------|-------------|--------------------|
+| 1 | Single Point of Failure | Critical | Monthly reconciliation process relies entirely on undocumented workarounds developed over 4 years | Document all workarounds immediately; assign shadow resource |
+| 2 | Access Credential Gap | High | Legacy reporting tool admin access held solely by departing employee | Transfer admin access before departure; document login procedures |
+| 3 | Relationship at Risk | High | Key banking partner relationships built on personal rapport over 4 years | Schedule introduction meetings with replacement within first 2 weeks |
+
+---
+
+## Section 3: Core Processes & Workflows
+
+### Monthly Reconciliation Process
+1. Pull raw transaction data from Salesforce (first Monday of each month)
+2. Cross-reference against banking partner statements (received via email from 3 contacts)
+3. Run custom Excel macro (stored in personal OneDrive — needs to be transferred)
+4. Flag discrepancies over £500 threshold for manual review
+5. Submit reconciliation report to VP Operations by 10th of each month
+
+**Known workaround:** Step 3 officially uses the standard finance template, but the employee developed a custom macro 3 years ago that catches formatting inconsistencies the standard template misses. This macro has never been documented or shared.
+
+**Common failure point:** Banking partner statements occasionally arrive late. The employee has built direct relationships with 2 contacts at the bank who will expedite on request — this relationship context needs to be passed to the replacement.
+
+### Client Escalation Protocol
+1. Escalation received via Jira ticket or direct Slack message
+2. Severity assessed using internal framework (documented in Confluence)
+3. For P1/P2: direct phone call to client within 2 hours
+4. Resolution tracked in Jira with client copied on updates
+5. Post-mortem documented for any P1 incident
+
+---
+
+## Section 4: Key Relationships & Stakeholders
+
+### Internal
+- **VP Operations (direct manager):** Weekly 1:1 on Thursdays, expects written updates for anything escalated
+- **Finance Director:** Monthly reconciliation handoff, prefers email over Slack
+- **Product Team Lead:** Regular sync on operational impact of product changes
+
+### External
+- **Sarah Chen (Premier Bank):** Primary contact for reconciliation queries, responds fastest on mobile
+- **David Morrison (Regulatory Affairs, FCA):** Annual compliance review contact, formal communication style preferred
+- **3 key enterprise clients:** Quarterly business reviews, personal relationships built over 3+ years
+
+---
+
+## Section 5: Tools & Systems
+
+| Tool | Access Level | Notes |
+|------|-------------|-------|
+| Salesforce | Admin | Primary CRM — custom dashboards need to be shared |
+| Jira | Project Admin | Manages all ops tickets and escalation workflows |
+| Confluence | Space Admin | Operations knowledge base owner |
+| Legacy Reporting Tool | Sole Admin | Critical gap — only person with admin credentials |
+| Slack | Standard | Key channels: #ops-escalations, #finance-sync, #leadership |
+
+---
+
+## Section 6: In-Flight Projects
+
+### Q2 System Migration (60% complete)
+- **Status:** In progress, on track
+- **Next milestone:** UAT testing begins March 15
+- **Risk:** Delay could impact monthly reconciliation process
+- **Key contact:** IT Project Manager (James Wells)
+
+### Client Onboarding Process Redesign (30% complete)
+- **Status:** Discovery phase
+- **Next milestone:** Stakeholder review March 28
+- **Risk:** Low — can be paused and handed over
+- **Key contact:** Product Team Lead
+
+---
+
+## Section 7: Undocumented Workarounds
+
+1. **Reconciliation macro** — Custom Excel macro that catches formatting issues the standard template misses. Stored in personal OneDrive. Needs to be moved to shared drive and documented.
+
+2. **Escalation fast-track** — For urgent client escalations, bypasses the standard Jira workflow by messaging the VP Operations directly on Slack with a specific emoji prefix (🔴) to signal immediate attention needed.
+
+3. **Banking statement chase** — When monthly statements are late, contacts Sarah Chen directly on mobile rather than going through the bank's official channels. Response time drops from 3 days to same-day.
+
+---
+
+## Section 8: Advice for Successor
+
+> "The most important thing is building relationships with the banking partners early. The processes you can learn, but the trust takes time. Book face-to-face meetings in your first two weeks — don't rely on email. And for the reconciliation process, don't trust the official documentation until you've run through it once with the macro. It catches things the standard process misses."
+
+---
+
+## Appendix: 90-Day Success Criteria
+
+- [ ] Maintain all existing client relationships without escalation
+- [ ] Complete Q2 reconciliation cycle independently
+- [ ] Obtain admin access to all systems listed in Section 5
+- [ ] Meet all key stakeholders (internal and external) within first 3 weeks
+- [ ] Shadow at least one full reconciliation cycle before going solo
+
+---
+
+*Generated by KnowledgeKeeper | Nukode*
+`
+
+// Store generated blob URLs for cleanup
+const _blobUrls = {}
+
 export async function generateDocument(sessionId, format) {
   await delay(3000)
   const docId = 'mock-doc-' + Math.random().toString(36).slice(2, 8)
+
+  // Create a downloadable blob
+  const blob = new Blob([MOCK_DOCUMENT_MARKDOWN], { type: 'text/markdown;charset=utf-8' })
+  const blobUrl = URL.createObjectURL(blob)
+  _blobUrls[docId] = blobUrl
+
   return {
     document_id: docId,
-    download_url: `/api/documents/${docId}`,
+    download_url: blobUrl,
   }
 }
 
 export function getDownloadUrl(documentId) {
-  return `/api/documents/${documentId}`
+  return _blobUrls[documentId] || '#'
 }
