@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --parchment-bg: #faf8f5;
+  --keeper-primary: #1b6b61;
+  --keeper-hover: #2a9d8f;
+  --ink-body: #3d3530;
+  --ink-heading: #1a1614;
+}
+
+body {
+  font-family: 'DM Sans', system-ui, sans-serif;
+  color: var(--ink-body);
+  background-color: var(--parchment-bg);
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(42, 157, 143, 0.04) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 20%, rgba(212, 202, 187, 0.15) 0%, transparent 50%),
+    radial-gradient(ellipse at 60% 80%, rgba(42, 157, 143, 0.03) 0%, transparent 50%);
+  min-height: 100vh;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4cabb;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b8a99a;
+}
+
+/* Animation delays for staggered children */
+.stagger-1 { animation-delay: 100ms; }
+.stagger-2 { animation-delay: 200ms; }
+.stagger-3 { animation-delay: 300ms; }
+.stagger-4 { animation-delay: 400ms; }
+
+/* Loading dot delays */
+.dot-1 { animation-delay: 0ms; }
+.dot-2 { animation-delay: 160ms; }
+.dot-3 { animation-delay: 320ms; }
+
+/* Checkmark draw animation */
+.checkmark-path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+}
+
+/* Textarea reset */
+textarea {
+  field-sizing: content;
+}

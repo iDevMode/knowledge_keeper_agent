@@ -1,0 +1,292 @@
+{
+  "process_heavy": {
+    "session_id": "fixture-stage2-process-heavy",
+    "stage1_session_id": "fixture-stage1-process-heavy",
+    "profile_id": "process_heavy",
+    "block_order": [
+      "internal_processes_workflows",
+      "technical_systems_tools",
+      "undocumented_workarounds",
+      "supplier_vendor_relationships",
+      "decision_making_logic"
+    ],
+    "block_depths": {
+      "internal_processes_workflows": "full",
+      "technical_systems_tools": "full",
+      "undocumented_workarounds": "full",
+      "supplier_vendor_relationships": "light",
+      "decision_making_logic": "light"
+    },
+    "answers": {
+      "role_orientation.0": "I'm the Senior Operations Coordinator. Day to day I manage the weekly production schedule, coordinate with our three shift supervisors, handle supplier order adjustments, and maintain the SAP production dashboards. The job description says 'operations coordination' but in reality I'm the single thread connecting planning, quality, and logistics.",
+      "role_orientation.1": "Monday is schedule planning — I pull the demand forecast, check material availability in SAP, and build the weekly production plan. Tuesday and Wednesday I'm on the floor resolving bottlenecks. Thursday is supplier day — I review orders, chase deliveries, adjust quantities. Friday is reporting — Power BI dashboards, weekly ops review with the Head of Operations.",
+      "role_orientation.2": "The most time-consuming part is the Monday scheduling run. The SAP system has been customised so heavily that the standard planning module doesn't work properly. I've built workarounds using custom reports and manual adjustments that take about 4 hours every Monday morning.",
+      "role_orientation.3": "Three things nobody else can do: the Monday SAP scheduling run with all its workarounds, the supplier negotiation process with our three key raw material suppliers, and the Power BI dashboard maintenance — I'm the only one with admin access and I built them from scratch.",
+      "role_orientation.4": "It's fairly steady most of the year but spikes badly in September and October — that's our peak manufacturing season. Volume triples and I'm often working 50-hour weeks. There's also a smaller spike in January when we do the annual inventory reconciliation.",
+      "internal_processes_workflows.0": "The three main processes I own are: weekly production scheduling, supplier order management, and quality incident escalation. The scheduling process is by far the most complex — it touches SAP, Excel, our MES system, and requires manual coordination with all three shift leads.",
+      "internal_processes_workflows.1": "The scheduling process starts when the demand forecast lands in my inbox from the sales team every Friday afternoon. I pull it into a custom SAP report I built, cross-reference with current inventory levels and material availability, then build the weekly schedule. If there are material shortages, I have to negotiate with suppliers for expedited delivery or adjust the production mix. The output is a finalised schedule that goes to all three shift supervisors by Monday 2pm.",
+      "internal_processes_workflows.2": "The scheduling process is partially documented in our ops handbook but it's about 2 years out of date. The SAP workarounds I use aren't documented anywhere. The supplier order process has a basic SOP but it doesn't cover the informal agreements I have with our top three suppliers. The quality escalation process is fully documented and up to date.",
+      "internal_processes_workflows.3": "The scheduling process is completely dependent on my SAP admin access — I'm the only person with permission to run the custom reports and modify the production plan directly. The supplier relationships are also personal — they deal with me by name and I've negotiated terms that aren't in the written contracts.",
+      "internal_processes_workflows.4": "The SAP batch scheduling module crashes about once a month. When it does, I have a manual workaround where I export the data, run it through an Excel macro I built, and re-import it. Nobody else knows this process exists because I just handle it quietly.",
+      "internal_processes_workflows.5": "I inherited the scheduling process from my predecessor who left 5 years ago. I completely rebuilt the SAP custom reports because the originals were broken, added the Power BI dashboards which didn't exist before, and established the Friday forecast handoff process with sales. Before that it was all done on paper spreadsheets.",
+      "internal_processes_workflows.6": "The most common mistake would be trusting the SAP standard planning output without running my custom validation report first. The standard output has known bugs around batch size calculations for our three specialty product lines. A new person would also likely miss the informal Thursday supplier check-in calls, which aren't in any calendar — I just do them from memory.",
+      "technical_systems_tools.0": "Main systems: SAP ERP (production module, materials management, custom reports), Excel (advanced — macros for scheduling backup), Power BI (dashboards I built and maintain), SharePoint (document storage), Outlook, and our MES system for floor-level production tracking. I also use a personal Notion workspace for my own notes but that's not official.",
+      "technical_systems_tools.1": "SAP is the backbone. I use the production planning module daily but with heavy customisation. There's a custom report ZPPROD001 that I built with the SAP consultant 3 years ago — it pulls demand, inventory, and capacity data into one view. Took me about 6 months to get it working properly. The standard SAP planning cockpit doesn't handle our batch splitting requirements correctly.",
+      "technical_systems_tools.2": "I set up an integration between SAP and Power BI using a scheduled data extract that runs at 6am every morning. If that extract fails, the dashboards show stale data and the Head of Operations gets the wrong numbers in the weekly review. I'm the only one who knows how to restart it — it involves logging into the SAP batch job scheduler and manually re-triggering job ZEXTRACT_BI.",
+      "technical_systems_tools.3": "SAP has a known bug in the batch scheduling module for product lines with more than 12 variants — it double-counts the setup time. I've reported it to SAP support twice and they say it's 'by design'. My workaround is to manually reduce the setup time in the planning parameters for those product lines by 50%. If someone doesn't know this, they'll under-schedule by about 20%.",
+      "technical_systems_tools.4": "I have admin access to SAP production module, Power BI workspace owner rights, and the only login for the SAP batch job scheduler. The MES system login is shared across the ops team but I have elevated permissions. My Notion workspace is personal and would need to be exported if they want my notes.",
+      "technical_systems_tools.5": "I built three Excel macros: one for the backup scheduling run when SAP crashes, one for the monthly supplier spend reconciliation, and one for converting MES output into a format SAP can import. None of them are documented — they live in a folder on my desktop called 'Ops Tools'.",
+      "undocumented_workarounds.0": "The biggest one is the Monday morning SAP scheduling workaround. The standard planning run takes 2 hours and gives wrong results for specialty products. My custom process takes 4 hours but produces an accurate schedule. Nobody has ever asked why it takes me 4 hours — they just know Monday mornings are blocked for me.",
+      "undocumented_workarounds.1": "When a supplier can't deliver on time, I have an informal arrangement with two of our secondary suppliers who can do emergency 48-hour turnarounds. This isn't in any procurement system — I just call them directly. The rates are about 15% higher but it's saved us from production stoppages at least 6 times.",
+      "undocumented_workarounds.2": "About 18 months ago, we had a batch contamination incident that traced back to a specific raw material lot numbering issue in SAP. I now manually cross-check lot numbers every Thursday as part of my supplier review. It takes 30 minutes but it's prevented at least two potential quality incidents. Nobody knows I do this.",
+      "undocumented_workarounds.3": "If the MES system shows a production variance of more than 5%, I always check the shift handover logs before escalating. Nine times out of ten it's a data entry error at shift changeover, not a real production issue. This saves the quality team about 2 hours of unnecessary investigation per incident.",
+      "undocumented_workarounds.4": "The business would be surprised to learn that the Power BI dashboards they rely on for the weekly ops review are held together with a manual data extract that runs at 6am and a prayer. If I'm on holiday and the extract fails, the dashboards go stale and nobody knows how to fix it.",
+      "supplier_vendor_relationships.0": "Three key suppliers: AlphaSteel for structural components, BetaChem for treatment chemicals, and GammaPlastics for packaging materials. I deal with them weekly.",
+      "supplier_vendor_relationships.1": "AlphaSteel: excellent relationship with their account manager Sarah Chen. She gives us priority scheduling because we've been reliable payers for 7 years. Key context — they're planning a factory move in Q3 which could disrupt supply for 2-3 weeks. BetaChem: solid but more transactional. Main contact is Dave Peters. We renegotiated a 12% discount last year that's not in the master contract yet — just an email agreement. GammaPlastics: rocky relationship — they missed three deliveries last quarter. I've been managing them carefully.",
+      "supplier_vendor_relationships.2": "The BetaChem discount and the AlphaSteel priority scheduling arrangement are both verbal/email agreements not in the formal contracts. If someone new called the main BetaChem number instead of Dave's direct line, they'd get standard pricing.",
+      "decision_making_logic.0": "The most frequent judgment call is deciding when to split a production batch versus running it as one large batch. The SAP system recommends one approach based on pure cost, but I factor in the shift team capabilities, equipment maintenance schedules, and customer delivery windows. Sometimes a slightly more expensive split batch avoids a quality risk or a missed delivery.",
+      "decision_making_logic.1": "I weigh three things: delivery deadline pressure, quality risk based on which shift team is running, and material availability. If our strongest shift team (Shift A) is running and we have full materials, I'll push for larger batches. If Shift C is running — they're newer and less experienced — I split into smaller, more manageable runs even though it costs more in setup time.",
+      "decision_making_logic.2": "My rule of thumb is: never sacrifice quality for efficiency, but do sacrifice efficiency for deadline. If a customer delivery is at risk, I'll authorise overtime and batch splitting. If there's no deadline pressure, I'll optimise for cost. The one thing to never do is promise a customer a delivery date without checking the SAP schedule first — my predecessor did this and it caused months of trust issues."
+    },
+    "conversation_history": [
+      {"type": "ai", "content": "Hello — I'm KnowledgeKeeper, and I'm here to have a conversation about your role so we can capture everything that would be valuable for the next person. Thank you for taking the time to do this — it's genuinely going to make a real difference for whoever steps into your role next. Let's start with the big picture. Can you describe your role in your own words?"},
+      {"type": "human", "content": "I'm the Senior Operations Coordinator. Day to day I manage the weekly production schedule, coordinate with our three shift supervisors, handle supplier order adjustments, and maintain the SAP production dashboards. The job description says 'operations coordination' but in reality I'm the single thread connecting planning, quality, and logistics."},
+      {"type": "ai", "content": "That's really helpful — it sounds like you're the connective tissue across several critical functions. What does a typical week look like for you?"},
+      {"type": "human", "content": "Monday is schedule planning — I pull the demand forecast, check material availability in SAP, and build the weekly production plan. Tuesday and Wednesday I'm on the floor resolving bottlenecks. Thursday is supplier day — I review orders, chase deliveries, adjust quantities. Friday is reporting — Power BI dashboards, weekly ops review with the Head of Operations."},
+      {"type": "ai", "content": "That's a well-structured rhythm. What's the most time-consuming part and why does it take so long?"},
+      {"type": "human", "content": "The most time-consuming part is the Monday scheduling run. The SAP system has been customised so heavily that the standard planning module doesn't work properly. I've built workarounds using custom reports and manual adjustments that take about 4 hours every Monday morning."},
+      {"type": "ai", "content": "Four hours of workarounds every Monday — that's significant. What are the two or three things you do that nobody else could pick up immediately?"},
+      {"type": "human", "content": "Three things nobody else can do: the Monday SAP scheduling run with all its workarounds, the supplier negotiation process with our three key raw material suppliers, and the Power BI dashboard maintenance — I'm the only one with admin access and I built them from scratch."},
+      {"type": "ai", "content": "Those sound like genuine single points of failure. How would you describe the volume — steady or does it spike?"},
+      {"type": "human", "content": "It's fairly steady most of the year but spikes badly in September and October — that's our peak manufacturing season. Volume triples and I'm often working 50-hour weeks. There's also a smaller spike in January when we do the annual inventory reconciliation."},
+      {"type": "ai", "content": "Thank you. Let's dive into the processes you own. Can you walk me through the key processes from start to finish?"},
+      {"type": "human", "content": "The three main processes I own are: weekly production scheduling, supplier order management, and quality incident escalation. The scheduling process is by far the most complex — it touches SAP, Excel, our MES system, and requires manual coordination with all three shift leads."}
+    ],
+    "risk_flags": [
+      {
+        "flag_type": "single_point_of_failure",
+        "severity": "critical",
+        "description": "Only person who knows the custom SAP batch scheduling workaround — Monday scheduling run would fail without this knowledge",
+        "recommended_action": "Document the complete SAP scheduling workaround step-by-step before departure date",
+        "source_block": "internal_processes_workflows",
+        "source_question_index": 0
+      },
+      {
+        "flag_type": "access_credential_gap",
+        "severity": "critical",
+        "description": "Sole admin access to SAP production module, Power BI workspace, and SAP batch job scheduler — no backup credentials shared",
+        "recommended_action": "Transfer all admin access credentials to Head of Operations and document login procedures immediately",
+        "source_block": "technical_systems_tools",
+        "source_question_index": 4
+      },
+      {
+        "flag_type": "undocumented_critical_process",
+        "severity": "high",
+        "description": "SAP-to-Power BI data extract runs at 6am daily with no monitoring — failure causes stale dashboard data used in weekly ops review",
+        "recommended_action": "Set up automated monitoring and alerting for the ZEXTRACT_BI batch job, document restart procedure",
+        "source_block": "technical_systems_tools",
+        "source_question_index": 2
+      },
+      {
+        "flag_type": "relationship_at_risk",
+        "severity": "high",
+        "description": "Informal supplier agreements (BetaChem 12% discount, AlphaSteel priority scheduling) exist only as verbal/email arrangements with personal contacts",
+        "recommended_action": "Formalise supplier agreements in writing before departure and introduce the replacement to key supplier contacts",
+        "source_block": "supplier_vendor_relationships",
+        "source_question_index": 2
+      }
+    ]
+  },
+  "decision_heavy": {
+    "session_id": "fixture-stage2-decision-heavy",
+    "stage1_session_id": "fixture-stage1-decision-heavy",
+    "profile_id": "decision_heavy",
+    "block_order": [
+      "decision_making_logic",
+      "client_stakeholder_relationships",
+      "strategic_context",
+      "regulatory_compliance",
+      "team_dynamics_management",
+      "undocumented_workarounds"
+    ],
+    "block_depths": {
+      "decision_making_logic": "full",
+      "client_stakeholder_relationships": "full",
+      "strategic_context": "full",
+      "regulatory_compliance": "light",
+      "team_dynamics_management": "light",
+      "undocumented_workarounds": "full"
+    },
+    "answers": {
+      "role_orientation.0": "I'm a Senior Financial Advisor managing a portfolio of about £8M in assets under management across 12 high-value clients. I provide personalised investment advice, manage portfolio allocations, and handle all client communications. Each client relationship is deeply personal — they trust me, not just the firm.",
+      "role_orientation.1": "Mondays I review all portfolio performance and market movements from the weekend. Tuesdays and Wednesdays are client meetings — usually 3-4 per week. Thursdays I do research and prepare recommendations. Fridays are admin, compliance submissions, and team catch-ups with my junior advisor and paraplanner.",
+      "role_orientation.2": "Client meetings are the most time-consuming but they're also the most valuable. Each meeting requires 2-3 hours of preparation — reviewing the client's full history, current market conditions, and preparing bespoke recommendations. I can't shortcut this because every client's situation is unique.",
+      "role_orientation.3": "Two things: first, the nuanced understanding of each client's true risk tolerance versus their documented risk profile — some clients say they're moderate but actually panic at any downturn. Second, my relationships with the three platform relationship managers who can expedite transfers and resolve issues quickly.",
+      "role_orientation.4": "It spikes around tax year end in April — everyone wants to use their ISA allowance and review their pension contributions. Also January when people make New Year financial resolutions. And whenever there's a major market event — clients call immediately wanting reassurance or action.",
+      "decision_making_logic.0": "The most frequent judgment call is deciding when to rebalance a client's portfolio. The system flags when allocations drift more than 5% from target, but I don't automatically rebalance. I consider: is the drift likely to self-correct? What's the client's current emotional state? Are there tax implications of selling now? Sometimes the right answer is to wait even though the numbers say act.",
+      "decision_making_logic.1": "Three main factors: the magnitude and direction of the drift, the client's recent communications (if they've been anxious, I avoid changes that might alarm them), and the tax position — particularly around CGT thresholds. I also consider market momentum — if a position has drifted up because of a genuine trend, selling prematurely locks in unnecessary transaction costs.",
+      "decision_making_logic.2": "Yes — most advisors at the firm rebalance mechanically when the system flags it. I don't, because I've learned that mechanical rebalancing during volatile periods increases transaction costs and client anxiety without improving outcomes. My approach is more judgment-based, which is why my client retention rate is higher than the firm average.",
+      "decision_making_logic.3": "The most consequential decision is recommending a client move into or out of a high-concentration position — for example, if a client has 40% in a single fund. Getting that wrong means either missing a significant gain or exposing them to concentrated risk. I always sleep on these decisions and discuss with the Managing Partner before recommending.",
+      "decision_making_logic.4": "My rule of thumb: if you can't explain a recommendation to the client in plain English in under two minutes, you don't understand it well enough to recommend it. Also: never chase performance. The clients who've done best are the ones I've talked out of trendy investments, not into them.",
+      "decision_making_logic.5": "Always: meet clients face to face at least quarterly even when there's nothing urgent — the relationship is the product. Never: make a recommendation based solely on what worked for another client — every situation is genuinely different. And never send a recommendation by email without a follow-up call to discuss it.",
+      "client_stakeholder_relationships.0": "My 12 clients break into three tiers. Tier 1 (4 clients, ~£5M combined): long-term relationships, high trust, complex portfolios. Tier 2 (5 clients, ~£2.5M): established relationships, standard portfolios. Tier 3 (3 clients, ~£0.5M): newer relationships, still building trust.",
+      "client_stakeholder_relationships.1": "The Tier 1 clients are the ones that matter most. Mr. and Mrs. Henderson have been with me for 9 years — they value conservative advice and personal attention. They're retired and any misstep with their portfolio would be devastating. James Thornton is a business owner — he's aggressive, wants high returns, and calls me at weekends. Sarah Blake is an executor for a family trust — very process-driven, wants everything documented.",
+      "client_stakeholder_relationships.2": "The Henderson and Thornton relationships are the most fragile during transition. The Hendersons have said explicitly they would consider leaving the firm if I left — they need personal introduction and reassurance. Thornton might try to follow me to my new firm — the replacement needs to demonstrate competence immediately.",
+      "client_stakeholder_relationships.3": "I have informal relationships with two compliance officers at our platform providers who fast-track my transfer requests. This saves 3-5 business days on fund switches. The official process takes 10 days — mine takes 5. The replacement would need to build this rapport themselves.",
+      "client_stakeholder_relationships.4": "James Thornton is the most challenging client. He's highly informed, checks his portfolio daily, and will challenge any recommendation. The effective approach is to always come prepared with data, never be defensive, and acknowledge when he makes a good point. He respects competence, not seniority.",
+      "client_stakeholder_relationships.5": "Several verbal commitments exist. I told the Hendersons we wouldn't charge for the portfolio restructuring we're doing in April — that was a goodwill gesture after a service issue. Sarah Blake's trust has an informal fee cap agreement that's not in the contract. These need to be documented and honoured.",
+      "strategic_context.0": "The firm is pushing to grow AUM from £50M to £80M in the next 2 years. They want to move upmarket — targeting HNW clients with £500K+ portfolios. There's also a push to adopt more ESG-focused investment strategies.",
+      "strategic_context.1": "My role is central to the AUM target — my portfolio is the largest in the firm. I also bring in 2-3 new clients per year through referrals from existing clients. The ESG push is something I've been piloting with two clients already.",
+      "strategic_context.2": "The Thornton account expansion is in-flight — he's considering consolidating another £1.2M from a competitor into our management. The Henderson portfolio restructuring is planned for April. And the firm is negotiating a new platform deal that I've been involved in evaluating.",
+      "strategic_context.3": "The firm is underestimating how dependent the client retention rate is on individual advisor relationships rather than the firm brand. If the replacement doesn't prioritise face-to-face client meetings in the first month, we could lose 2-3 clients worth £2M+.",
+      "strategic_context.4": "Focus on the Tier 1 clients first — everything else can wait. Build trust through preparation and follow-through, not through promises. And learn each client's communication preference before your first meeting — some want email summaries, some want phone calls, some want everything face to face.",
+      "regulatory_compliance.0": "FCA requirements are central. Every client recommendation needs a suitability report, every portfolio change needs documented rationale, and we have annual attestation requirements. I manage this through a personal checklist system in Xplan that flags upcoming deadlines.",
+      "regulatory_compliance.1": "April has the ISA deadline, July has the annual client review attestations due to the FCA, and October is the firm's annual compliance audit. The July attestations are the most complex — each client needs a documented annual review.",
+      "regulatory_compliance.2": "One area I'm managing carefully is a client complaint from last year that's technically still open with the FCA. It's been resolved with the client but the formal closure hasn't been processed. The replacement needs to follow up on this with the Compliance Officer.",
+      "team_dynamics_management.0": "I work with Tom, my junior advisor, and Maria, my paraplanner. Tom handles the admin and simpler client queries. Maria prepares all the suitability reports and research packs. We meet every Monday morning to plan the week.",
+      "team_dynamics_management.1": "Tom is eager but needs more confidence making independent decisions. He checks with me on things he could handle alone. The best approach is to give him explicit permission to handle specific client queries independently — he just needs the authority, not the knowledge. Maria is excellent but she's been hinting she might leave if her workload doesn't reduce.",
+      "team_dynamics_management.2": "Tom will struggle most with this transition. He's used to my style and relies on me for guidance. The replacement should schedule weekly one-to-ones with him for at least the first three months. Maria will be fine — she's self-directed — but she needs acknowledgement that her workload is being addressed.",
+      "undocumented_workarounds.0": "My personal client risk tolerance notes — I keep a separate document for each Tier 1 client that goes beyond the Xplan risk profile. For example, Mr Henderson's documented profile says 'moderate' but in practice he can't handle more than a 3% drawdown without calling. These nuances aren't in any system.",
+      "undocumented_workarounds.1": "When I need to fast-track a fund switch, I email my platform contacts directly with 'PRIORITY' in the subject line. They know to process it same-day. The official process doesn't support priority requests — this is purely relationship-based.",
+      "undocumented_workarounds.2": "After the 2022 market downturn, I set up personal calendar alerts for each client's 'panic threshold' — the portfolio decline percentage at which they typically call. When the market drops, I proactively call clients before they hit their threshold. This prevents panic selling and has saved several client relationships.",
+      "undocumented_workarounds.3": "If a suitability report is rejected by compliance, I always call the compliance officer rather than resubmitting by email. A 5-minute conversation resolves 90% of issues versus 3-4 rounds of email exchanges. The compliance team is overworked and appreciates the efficiency.",
+      "undocumented_workarounds.4": "The business would be surprised to learn that my client retention rate — which they cite as a firm benchmark — is largely because of proactive threshold-based calling that I do in my own time. It's not in any process document and nobody else does it.",
+      "closing_sequence.0": "The one thing I haven't mentioned is the informal referral network. About half my new clients come from existing client referrals. I nurture these by sending handwritten thank-you notes after every referral. It's a personal touch that drives significant business growth but it's completely off-book.",
+      "closing_sequence.1": "Trust is everything. You can't shortcut it, you can't fake it, and you definitely can't inherit it. Meet every client face to face before you make a single recommendation. Listen more than you talk in those first meetings. And remember — they're trusting you with their retirement, their children's education, their peace of mind. Treat it with that weight.",
+      "closing_sequence.2": "Speak to the Managing Partner first — he knows every client at a high level and can give context. Then speak to Maria — she knows the operational side of every account. And reach out to Sarah Blake early — she's the most process-driven client and if you handle her well, word will spread to the others."
+    },
+    "conversation_history": [
+      {"type": "ai", "content": "Hello — I'm KnowledgeKeeper. Thank you for taking the time to do this. There are no wrong answers and this is purely about making the transition as smooth as possible. Can you describe your role in your own words?"},
+      {"type": "human", "content": "I'm a Senior Financial Advisor managing a portfolio of about £8M in assets under management across 12 high-value clients. I provide personalised investment advice, manage portfolio allocations, and handle all client communications. Each client relationship is deeply personal — they trust me, not just the firm."},
+      {"type": "ai", "content": "That's a significant portfolio with deeply personal relationships. What does a typical week look like for you?"},
+      {"type": "human", "content": "Mondays I review all portfolio performance and market movements from the weekend. Tuesdays and Wednesdays are client meetings — usually 3-4 per week. Thursdays I do research and prepare recommendations. Fridays are admin, compliance submissions, and team catch-ups with my junior advisor and paraplanner."},
+      {"type": "ai", "content": "Thank you. Let's talk about how you make decisions. Can you think of a judgment call you make regularly and walk me through how you approach it?"},
+      {"type": "human", "content": "The most frequent judgment call is deciding when to rebalance a client's portfolio. The system flags when allocations drift more than 5% from target, but I don't automatically rebalance. I consider: is the drift likely to self-correct? What's the client's current emotional state? Are there tax implications of selling now? Sometimes the right answer is to wait even though the numbers say act."},
+      {"type": "ai", "content": "That's sophisticated — you're weighing emotional and tax factors alongside the quantitative signals. What factors tip the balance one way versus another?"},
+      {"type": "human", "content": "Three main factors: the magnitude and direction of the drift, the client's recent communications (if they've been anxious, I avoid changes that might alarm them), and the tax position — particularly around CGT thresholds. I also consider market momentum — if a position has drifted up because of a genuine trend, selling prematurely locks in unnecessary transaction costs."}
+    ],
+    "risk_flags": [
+      {
+        "flag_type": "relationship_at_risk",
+        "severity": "critical",
+        "description": "Henderson clients (£2M+ AUM) have explicitly stated they may leave the firm — relationship is entirely personal with departing advisor",
+        "recommended_action": "Arrange personal introduction meeting with replacement before departure, co-managed transition period",
+        "source_block": "client_stakeholder_relationships",
+        "source_question_index": 2
+      },
+      {
+        "flag_type": "in_flight_item",
+        "severity": "critical",
+        "description": "Thornton account expansion (£1.2M consolidation) is in active negotiation — delay could lose the business",
+        "recommended_action": "Brief replacement on Thornton relationship dynamics and current negotiation status immediately",
+        "source_block": "strategic_context",
+        "source_question_index": 2
+      },
+      {
+        "flag_type": "undocumented_critical_process",
+        "severity": "high",
+        "description": "Client risk tolerance nuances exist only in personal notes — documented profiles do not reflect true risk thresholds",
+        "recommended_action": "Transfer personal risk tolerance notes into Xplan client records before departure",
+        "source_block": "undocumented_workarounds",
+        "source_question_index": 0
+      },
+      {
+        "flag_type": "in_flight_item",
+        "severity": "medium",
+        "description": "Open FCA complaint technically unresolved — requires formal closure process",
+        "recommended_action": "Follow up with Compliance Officer to formally close the FCA complaint before departure",
+        "source_block": "regulatory_compliance",
+        "source_question_index": 2
+      }
+    ]
+  },
+  "relationship_heavy": {
+    "session_id": "fixture-stage2-relationship-heavy",
+    "stage1_session_id": "fixture-stage1-relationship-heavy",
+    "profile_id": "relationship_heavy",
+    "block_order": [
+      "client_stakeholder_relationships",
+      "team_dynamics_management",
+      "strategic_context",
+      "internal_processes_workflows",
+      "undocumented_workarounds"
+    ],
+    "block_depths": {
+      "client_stakeholder_relationships": "full",
+      "team_dynamics_management": "full",
+      "strategic_context": "full",
+      "internal_processes_workflows": "light",
+      "undocumented_workarounds": "full"
+    },
+    "answers": {
+      "role_orientation.0": "I'm a Principal Consultant at GreenBridge. My role is basically relationship management and delivery oversight for our consulting engagements. I manage 3 active client accounts and oversee the consultants assigned to each. The reality is that clients work with us because of me personally — I'm the face of the firm for them.",
+      "role_orientation.1": "Mondays I do account reviews — checking project status, upcoming milestones, any issues. Tuesdays and Wednesdays are usually client-facing — meetings, workshops, or site visits. Thursdays are internal — team catch-ups, resource planning, business development. Fridays are flex — often used for proposals or catching up on admin.",
+      "role_orientation.2": "Client relationship maintenance is the most time-consuming. It's not just formal meetings — it's the coffee catch-ups, the checking-in calls, remembering personal details. Each key client probably gets 2-3 hours of informal relationship time per week on top of the formal engagement hours.",
+      "role_orientation.3": "Two things: first, I know the unwritten rules for each client — what they actually want versus what they say in briefs. Second, I'm the only one who has the full picture across all three active engagements, which means I can spot resource conflicts and manage client expectations before they become problems.",
+      "role_orientation.4": "It spikes when proposals are due — we typically respond to 2-3 RFPs per quarter and each one is a full week of effort. Also when client contracts are up for renewal, which happens to be clustered in Q1 for two of our three active clients.",
+      "client_stakeholder_relationships.0": "Three active clients: NorthStar Energy (our biggest account, £200K annual), ClearPath Health (£120K), and Summit Retail (£80K). Plus four dormant accounts that could re-engage and two referral partners — a law firm and an accounting practice that send us leads.",
+      "client_stakeholder_relationships.1": "NorthStar: I work primarily with their COO, Rachel Martinez. She values straight talk and fast turnarounds. The relationship goes back to a previous firm where I worked with her 8 years ago. She specifically moved this account to GreenBridge when I joined. Sensitive area: they're considering bringing consulting in-house — I've been managing this risk by demonstrating ROI consistently.",
+      "client_stakeholder_relationships.2": "NorthStar is the highest risk. Rachel's loyalty is to me, not the firm. If the transition isn't handled well, there's a real chance they take the engagement in-house earlier than planned. The replacement needs to be introduced as someone I personally chose and trust — that framing matters. ClearPath is lower risk — the engagement is more process-driven.",
+      "client_stakeholder_relationships.3": "I have an informal relationship with NorthStar's Head of Strategy, Mark Chen. He's not part of our formal engagement but he tips me off about upcoming strategic shifts that help me position our proposals. He does this as a personal favour because I helped him with a career transition years ago.",
+      "client_stakeholder_relationships.4": "Summit Retail's procurement lead, David Kim, is very difficult. He's adversarial in negotiations and tries to reduce scope after contracts are signed. The approach that works is to always have everything in writing, never agree to anything in meetings without a follow-up email confirming terms, and never take his initial position personally — he does it with every supplier.",
+      "client_stakeholder_relationships.5": "I've verbally agreed with Rachel at NorthStar that we'll hold our rates flat for next year's renewal in exchange for a two-year commitment instead of one. This hasn't been put in writing yet but she's expecting it. Also, ClearPath's programme director and I agreed they could defer the Q1 deliverable by three weeks — this is just in a Slack message.",
+      "team_dynamics_management.0": "The wider team is 4 principals and 8 consultants in a shared pool. My day-to-day team is the 2-3 consultants assigned to my client accounts at any time. Currently that's Priya, who's excellent and handles NorthStar day-to-day, Ben who's on ClearPath, and a new consultant Jake who's supporting Summit.",
+      "team_dynamics_management.1": "Priya is our best consultant — highly autonomous, great with clients. She's been hinting about wanting the principal track but there's no clear progression path right now. If she doesn't see movement in 6 months, she'll leave. Ben is solid but needs structure — give him clear deliverables and timelines and he excels, but he struggles with ambiguity. Jake is new and needs close oversight for at least 3 more months.",
+      "team_dynamics_management.2": "The main dynamic to be aware of is the tension between principals over resource allocation. We share the consultant pool and there's no formal allocation process — it's basically whoever has the strongest client pressure gets priority. I've been effective at this because I plan ahead, but it causes friction with one of the other principals, Liam, who tends to request resources at the last minute.",
+      "team_dynamics_management.3": "Priya will find this transition the most difficult. She and I have a strong working relationship and she sees me as her sponsor for the principal track. The replacement needs to explicitly commit to supporting Priya's development — or she'll disengage. Ben will be fine with any principal who gives clear direction.",
+      "team_dynamics_management.4": "The biggest team challenge is capacity. We're consistently running at 110% utilisation which means quality suffers and people burn out. I've been advocating for hiring another consultant for 6 months but the MD wants to see if we can manage with the current headcount. This is unsustainable.",
+      "strategic_context.0": "The firm wants to grow from 4 to 6 principals and expand into digital transformation consulting alongside our existing management consulting. The MD is also exploring a potential merger with a smaller boutique that has complementary capabilities.",
+      "strategic_context.1": "My accounts represent about 40% of the firm's revenue. Beyond that, I've been leading the push into structured proposal processes — before I arrived, proposals were written ad hoc. I also mentor the junior consultants informally, which isn't in my role description but is critical for retention.",
+      "strategic_context.2": "The NorthStar contract renewal is the most critical in-flight item — it's worth £200K and needs to be managed carefully given the in-house consulting risk. The ClearPath Q1 deliverable deferral needs to be managed. And I've been in early conversations with a potential new client, Aurora Tech, that could be worth £150K annually.",
+      "strategic_context.3": "The firm is underestimating the client concentration risk. Three clients represent 80% of revenue, and two of those relationships are heavily dependent on individual principals. If NorthStar and one other account churned, the firm would be in serious trouble. Diversification should be a higher priority.",
+      "strategic_context.4": "Focus on NorthStar first — protect the revenue. Build a genuine relationship with Rachel, don't just manage the account. Learn what keeps her up at night and solve those problems. And listen to Priya — she knows the client operations better than anyone and she'll be your greatest asset if you treat her right.",
+      "internal_processes_workflows.0": "I own the end-to-end proposal process for my accounts, client onboarding for new engagements, and monthly client reporting. The proposal process is the most complex — from opportunity identification through to contract signing.",
+      "internal_processes_workflows.1": "Proposals start when I identify an opportunity through client conversations. I scope it informally first, then build a formal proposal using our Notion template. The proposal goes through MD review, gets priced, and I present it to the client. The whole cycle takes 2-4 weeks depending on complexity.",
+      "internal_processes_workflows.2": "The proposal template in Notion is documented but the pricing model is entirely in my head. I know what rates each client will accept and how much flexibility we have. This isn't written down anywhere — I just know from experience what will fly and what won't.",
+      "undocumented_workarounds.0": "The biggest piece of tribal knowledge is understanding each client's real decision-making process. NorthStar: Rachel decides but needs to present to her board, so proposals need to be structured as board papers. ClearPath: the programme director decides but procurement has veto power, so you need both aligned. Summit: David Kim makes all decisions unilaterally.",
+      "undocumented_workarounds.1": "When a client is unhappy but hasn't said anything formally, I can tell from their email response times. If Rachel goes from replying within an hour to taking 2-3 days, something is wrong. I've learned to proactively reach out at that point rather than waiting for a formal complaint.",
+      "undocumented_workarounds.2": "We had a near-miss with NorthStar last year when a consultant made an error in a deliverable. I caught it before it went to the client by always doing a final review of everything that goes out under my name. The official process says the consultant is responsible for quality, but in practice I always review. If I hadn't caught that error, we could have lost the account.",
+      "undocumented_workarounds.3": "If I need to get a proposal through the MD's review quickly, I pre-brief him informally over coffee rather than sending it cold. This cuts the review cycle from a week to two days because he's already bought in before the formal review.",
+      "undocumented_workarounds.4": "The business would probably be surprised to learn how much client relationship maintenance happens outside working hours. I probably spend 3-4 hours per week on informal client contact — coffee meetings, checking in on personal matters, attending their industry events. This is entirely self-directed and not tracked anywhere.",
+      "closing_sequence.0": "The one thing I haven't mentioned is the referral partnerships. Our law firm contact, Anna at Chambers & Co, and our accountant contact, Steve at Deloitte SME Practice, each send us 1-2 leads per year. These relationships are entirely mine — the firm doesn't manage them centrally. They should be transitioned carefully.",
+      "closing_sequence.1": "Relationships take time. Don't try to replace what took me 5 years to build in your first month. Be honest with clients that you're new. Ask them what they need rather than telling them. And don't make promises you can't keep — clients remember every commitment, especially broken ones.",
+      "closing_sequence.2": "Speak to Rachel Martinez at NorthStar first — she's the relationship that matters most. Then Priya — she'll be your eyes and ears. And talk to Anna at Chambers & Co early because there's a potential referral in the pipeline that could be your first win."
+    },
+    "conversation_history": [
+      {"type": "ai", "content": "Hello — I'm KnowledgeKeeper. Thank you for taking the time to do this. I know transitions like this can be a lot, so I want to keep this as straightforward and comfortable as possible. Can you describe your role in your own words?"},
+      {"type": "human", "content": "I'm a Principal Consultant at GreenBridge. My role is basically relationship management and delivery oversight for our consulting engagements. I manage 3 active client accounts and oversee the consultants assigned to each. The reality is that clients work with us because of me personally — I'm the face of the firm for them."},
+      {"type": "ai", "content": "That's really valuable context. What does a typical week look like for you?"},
+      {"type": "human", "content": "Mondays I do account reviews — checking project status, upcoming milestones, any issues. Tuesdays and Wednesdays are usually client-facing — meetings, workshops, or site visits. Thursdays are internal — team catch-ups, resource planning, business development. Fridays are flex — often used for proposals or catching up on admin."},
+      {"type": "ai", "content": "Thank you. Let's talk about your key client relationships. Can you walk me through the most important ones?"},
+      {"type": "human", "content": "Three active clients: NorthStar Energy (our biggest account, £200K annual), ClearPath Health (£120K), and Summit Retail (£80K). Plus four dormant accounts that could re-engage and two referral partners — a law firm and an accounting practice that send us leads."},
+      {"type": "ai", "content": "That's a significant portfolio. Tell me more about the NorthStar relationship — what does that person or organisation expect and value most?"},
+      {"type": "human", "content": "NorthStar: I work primarily with their COO, Rachel Martinez. She values straight talk and fast turnarounds. The relationship goes back to a previous firm where I worked with her 8 years ago. She specifically moved this account to GreenBridge when I joined. Sensitive area: they're considering bringing consulting in-house — I've been managing this risk by demonstrating ROI consistently."}
+    ],
+    "risk_flags": [
+      {
+        "flag_type": "relationship_at_risk",
+        "severity": "critical",
+        "description": "NorthStar Energy (£200K/year, 50% of principal's revenue) — COO's loyalty is personal, not to the firm, and they're considering in-house consulting",
+        "recommended_action": "Arrange co-managed introduction with replacement framed as personally selected successor, demonstrate continuity of service quality",
+        "source_block": "client_stakeholder_relationships",
+        "source_question_index": 2
+      },
+      {
+        "flag_type": "in_flight_item",
+        "severity": "critical",
+        "description": "NorthStar contract renewal worth £200K is approaching with in-house consulting risk — requires careful management",
+        "recommended_action": "Brief replacement on renewal strategy and Rachel's concerns about in-house vs outsource trade-offs",
+        "source_block": "strategic_context",
+        "source_question_index": 2
+      },
+      {
+        "flag_type": "single_point_of_failure",
+        "severity": "high",
+        "description": "Client pricing model exists only in departing principal's head — no documented pricing framework for client-specific rates and negotiation margins",
+        "recommended_action": "Document pricing assumptions and client-specific rate cards before departure",
+        "source_block": "internal_processes_workflows",
+        "source_question_index": 2
+      }
+    ]
+  }
+}

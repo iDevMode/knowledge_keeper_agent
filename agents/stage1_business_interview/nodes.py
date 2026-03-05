@@ -78,10 +78,13 @@ def ask_question_node(state: Stage1State) -> Dict[str, Any]:
 
     instruction = questions[index]
 
+    combined_system = (
+        f"{STAGE1_SYSTEM_PROMPT}\n\n"
+        f"## CURRENT INSTRUCTION\n\n{instruction}\n\nRemember: ask exactly ONE question."
+    )
     messages = [
-        SystemMessage(content=STAGE1_SYSTEM_PROMPT),
+        SystemMessage(content=combined_system),
         *state["conversation_history"],
-        SystemMessage(content=f"## CURRENT INSTRUCTION\n\n{instruction}\n\nRemember: ask exactly ONE question."),
     ]
 
     llm = _get_primary_llm()
@@ -92,7 +95,7 @@ def ask_question_node(state: Stage1State) -> Dict[str, Any]:
     if not validate_single_question(response_text):
         logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
         messages.append(AIMessage(content=response_text))
-        messages.append(SystemMessage(content=SINGLE_QUESTION_REPROMPT))
+        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
         response = llm.invoke(messages)
         response_text = response.content
 
@@ -209,10 +212,10 @@ def followup_question_node(state: Stage1State) -> Dict[str, Any]:
         "acknowledging what the person just said. Ask exactly ONE follow-up question."
     )
 
+    combined_system = f"{STAGE1_SYSTEM_PROMPT}\n\n{instruction}"
     messages = [
-        SystemMessage(content=STAGE1_SYSTEM_PROMPT),
+        SystemMessage(content=combined_system),
         *state["conversation_history"],
-        SystemMessage(content=instruction),
     ]
 
     llm = _get_primary_llm()
@@ -221,7 +224,7 @@ def followup_question_node(state: Stage1State) -> Dict[str, Any]:
 
     if not validate_single_question(response_text):
         messages.append(AIMessage(content=response_text))
-        messages.append(SystemMessage(content=SINGLE_QUESTION_REPROMPT))
+        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
         response = llm.invoke(messages)
         response_text = response.content
 
