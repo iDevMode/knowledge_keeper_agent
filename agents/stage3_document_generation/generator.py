@@ -2,8 +2,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+import anthropic
+from langchain_core.messages import BaseMessage
 
 from agents.stage3_document_generation.prompts import STAGE3_SYSTEM_PROMPT, build_context_block
 from config.settings import settings
@@ -49,13 +49,29 @@ _REQUIRED_SENTINELS = [
 # Knowledge Transfer appears multiple times (once per priority)
 _KNOWLEDGE_TRANSFER_MIN_COUNT = 3
 
+_MAX_TOKENS = 12000
 
-def _get_generation_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.primary_model,
+
+def _get_client() -> anthropic.Anthropic:
+    return anthropic.Anthropic(
         api_key=settings.anthropic_api_key,
-        max_tokens=8192,
+        timeout=600.0,
+        max_retries=3,
     )
+
+
+def _stream_generation(client: anthropic.Anthropic, system: str, user_content: str) -> str:
+    """Generate document using streaming to keep connection alive."""
+    chunks = []
+    with client.messages.stream(
+        model=settings.primary_model,
+        max_tokens=_MAX_TOKENS,
+        system=system,
+        messages=[{"role": "user", "content": user_content}],
+    ) as stream:
+        for text in stream.text_stream:
+            chunks.append(text)
+    return "".join(chunks)
 
 
 def _validate_output(raw_text: str) -> List[str]:
@@ -80,11 +96,12 @@ def _validate_output(raw_text: str) -> List[str]:
 def generate_document(request: GenerationRequest) -> GenerationResult:
     """Generate the complete handover document from Stage 2 data.
 
-    Makes a single LLM call (retries once on structural validation failure).
+    Uses streaming to prevent connection drops on long generation calls.
+    Retries once on structural validation failure with a fresh request.
 
     Raises:
         ValueError: If request has invalid preconditions.
-        RuntimeError: If both LLM attempts fail structural validation.
+        RuntimeError: If both attempts fail structural validation.
     """
     if not request.session_id:
         raise ValueError("session_id is required")
@@ -108,15 +125,10 @@ def generate_document(request: GenerationRequest) -> GenerationResult:
         block_depths=request.block_depths,
     )
 
-    llm = _get_generation_llm()
-    messages = [
-        SystemMessage(content=STAGE3_SYSTEM_PROMPT),
-        HumanMessage(content=context),
-    ]
+    client = _get_client()
 
     # First attempt
-    response = llm.invoke(messages)
-    raw_markdown = response.content
+    raw_markdown = _stream_generation(client, STAGE3_SYSTEM_PROMPT, context)
 
     # Validate structure
     missing = _validate_output(raw_markdown)
@@ -126,15 +138,15 @@ def generate_document(request: GenerationRequest) -> GenerationResult:
             "session=%s stage=3 missing sections on first attempt: %s — retrying",
             session_id, missing,
         )
-        # Retry with explicit instruction about missing sections
-        retry_msg = (
-            "The document you generated is missing the following required sections. "
-            "Please regenerate the COMPLETE document including ALL sections:\n\n"
+        # Retry with augmented context (fresh request, not appending to conversation)
+        retry_context = (
+            context
+            + "\n\n## CRITICAL REMINDER\n"
+            + "Your previous attempt was missing these required sections. "
+            + "You MUST include ALL of them:\n"
             + "\n".join(f"- ### SECTION: {name}" for name in missing)
         )
-        messages.append(SystemMessage(content=retry_msg))
-        response = llm.invoke(messages)
-        raw_markdown = response.content
+        raw_markdown = _stream_generation(client, STAGE3_SYSTEM_PROMPT, retry_context)
 
         # Validate again
         still_missing = _validate_output(raw_markdown)

@@ -232,11 +232,9 @@ class TestContextAssembly:
 # ---- TestDocumentGenerator ----
 
 class TestDocumentGenerator:
-    @patch("agents.stage3_document_generation.generator._get_generation_llm")
-    def test_generate_document_success(self, mock_get_llm):
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=_build_valid_markdown())
-        mock_get_llm.return_value = mock_llm
+    @patch("agents.stage3_document_generation.generator._stream_generation")
+    def test_generate_document_success(self, mock_stream):
+        mock_stream.return_value = _build_valid_markdown()
 
         req = _make_generation_request("process_heavy")
         result = generate_document(req)
@@ -246,46 +244,35 @@ class TestDocumentGenerator:
         assert len(result.raw_markdown) > 0
         assert result.generation_metadata["question_count"] == len(req.answers)
 
-    @patch("agents.stage3_document_generation.generator._get_generation_llm")
-    def test_generate_document_retries_on_missing_sections(self, mock_get_llm):
+    @patch("agents.stage3_document_generation.generator._stream_generation")
+    def test_generate_document_retries_on_missing_sections(self, mock_stream):
         # First call missing Risk Summary, second call complete
         incomplete = _build_valid_markdown().replace("### SECTION: Risk Summary", "### SECTION: Risk Overview")
         complete = _build_valid_markdown()
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = [
-            MagicMock(content=incomplete),
-            MagicMock(content=complete),
-        ]
-        mock_get_llm.return_value = mock_llm
+        mock_stream.side_effect = [incomplete, complete]
 
         req = _make_generation_request("process_heavy")
         result = generate_document(req)
 
-        assert mock_llm.invoke.call_count == 2
+        assert mock_stream.call_count == 2
         assert "Risk Summary" in result.raw_markdown
 
-    @patch("agents.stage3_document_generation.generator._get_generation_llm")
-    def test_generate_document_raises_after_two_failures(self, mock_get_llm):
+    @patch("agents.stage3_document_generation.generator._stream_generation")
+    def test_generate_document_raises_after_two_failures(self, mock_stream):
         incomplete = "Just some random text without any sentinel markers."
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=incomplete)
-        mock_get_llm.return_value = mock_llm
+        mock_stream.return_value = incomplete
 
         req = _make_generation_request("process_heavy")
         with pytest.raises(RuntimeError, match="missing sections"):
             generate_document(req)
 
-        assert mock_llm.invoke.call_count == 2
+        assert mock_stream.call_count == 2
 
-    @patch("agents.stage3_document_generation.generator.ChatAnthropic")
-    def test_max_tokens_is_8192(self, mock_cls):
-        from agents.stage3_document_generation.generator import _get_generation_llm
-        _get_generation_llm()
-        mock_cls.assert_called_once()
-        call_kwargs = mock_cls.call_args
-        assert call_kwargs.kwargs.get("max_tokens") == 8192
+    def test_max_tokens_is_12000(self):
+        from agents.stage3_document_generation.generator import _MAX_TOKENS
+        assert _MAX_TOKENS == 12000
 
 
 # ---- TestOutputValidation ----
@@ -542,11 +529,9 @@ class TestHtmlBuilder:
 # ---- TestIntegration ----
 
 class TestIntegration:
-    @patch("agents.stage3_document_generation.generator._get_generation_llm")
-    def test_process_heavy_end_to_end(self, mock_get_llm):
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=_build_valid_markdown("process_heavy"))
-        mock_get_llm.return_value = mock_llm
+    @patch("agents.stage3_document_generation.generator._stream_generation")
+    def test_process_heavy_end_to_end(self, mock_stream):
+        mock_stream.return_value = _build_valid_markdown("process_heavy")
 
         req = _make_generation_request("process_heavy")
         result = generate_document(req)
@@ -559,11 +544,9 @@ class TestIntegration:
             assert doc.sections[0].name == "Document Header"
             assert doc.has_risk_flags is True
 
-    @patch("agents.stage3_document_generation.generator._get_generation_llm")
-    def test_decision_heavy_end_to_end(self, mock_get_llm):
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=_build_valid_markdown("decision_heavy"))
-        mock_get_llm.return_value = mock_llm
+    @patch("agents.stage3_document_generation.generator._stream_generation")
+    def test_decision_heavy_end_to_end(self, mock_stream):
+        mock_stream.return_value = _build_valid_markdown("decision_heavy")
 
         req = _make_generation_request("decision_heavy")
         result = generate_document(req)
@@ -572,11 +555,9 @@ class TestIntegration:
         assert len(doc.sections) == 14
         assert "Senior Financial Advisor" in doc.title
 
-    @patch("agents.stage3_document_generation.generator._get_generation_llm")
-    def test_relationship_heavy_end_to_end(self, mock_get_llm):
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=_build_valid_markdown("relationship_heavy"))
-        mock_get_llm.return_value = mock_llm
+    @patch("agents.stage3_document_generation.generator._stream_generation")
+    def test_relationship_heavy_end_to_end(self, mock_stream):
+        mock_stream.return_value = _build_valid_markdown("relationship_heavy")
 
         req = _make_generation_request("relationship_heavy")
         result = generate_document(req)

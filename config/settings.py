@@ -1,3 +1,5 @@
+import sys
+
 from pydantic_settings import BaseSettings
 
 
@@ -22,7 +24,23 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
 
+    # Port (for deployment platforms like Railway)
+    port: int = 8321
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    def validate_for_production(self) -> None:
+        """Check critical settings are configured. Call at startup."""
+        errors = []
+        if not self.anthropic_api_key:
+            errors.append("ANTHROPIC_API_KEY is not set")
+        if self.allowed_origins == "http://localhost:3000" and self.environment != "development":
+            errors.append("ALLOWED_ORIGINS is still set to localhost — set to your production domain")
+        if errors:
+            for err in errors:
+                print(f"[FATAL] {err}", file=sys.stderr)
+            if self.environment != "development":
+                raise SystemExit(1)
 
 
 settings = Settings()

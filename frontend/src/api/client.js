@@ -2,9 +2,8 @@ import * as mock from './mock.js'
 
 const BASE = '/api'
 
-// Set to true to force demo mode (no backend needed)
-// Set to false to use the real backend on port 8321
-const DEMO_MODE = true
+// Control via VITE_DEMO_MODE env var. Defaults to false (use real backend).
+const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
 
 async function request(url, options = {}) {
   const res = await fetch(`${BASE}${url}`, {
@@ -50,11 +49,29 @@ export async function getSessionStatus(sessionId) {
 
 export async function generateDocument(sessionId, format = 'docx') {
   if (DEMO_MODE) return mock.generateDocument(sessionId, format)
+
+  // Start generation (returns immediately)
   const res = await request(`/sessions/${sessionId}/generate`, {
     method: 'POST',
     body: JSON.stringify({ format }),
   })
-  return res.json()
+  const data = await res.json()
+
+  // Poll until complete
+  const documentId = data.document_id
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+    const statusRes = await request(`/documents/${documentId}/status`)
+    const status = await statusRes.json()
+
+    if (status.status === 'complete') {
+      return { document_id: documentId, download_url: status.download_url }
+    }
+    if (status.status === 'failed') {
+      throw new Error(status.error || 'Document generation failed')
+    }
+    // Still generating — keep polling
+  }
 }
 
 export function getDownloadUrl(documentId) {

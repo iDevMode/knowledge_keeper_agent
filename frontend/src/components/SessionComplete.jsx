@@ -135,7 +135,7 @@ function Stage2Complete({ sessionId }) {
       ) : (
         <a
           href={downloadUrl}
-          download={`KnowledgeKeeper-Handover.${format === 'pdf' ? 'pdf' : 'md'}`}
+          download={`KnowledgeKeeper-Handover.${format === 'pdf' ? 'pdf' : 'docx'}`}
           className="block w-full py-3 rounded-xl bg-keeper-500 text-white font-medium text-center hover:bg-keeper-400 transition-colors"
         >
           Download {format.toUpperCase()}

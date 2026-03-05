@@ -318,38 +318,20 @@ class TestGenerateDocument:
         )
         return session_id, stage1_id
 
-    @patch("api.routes.generate_document")
-    @patch("api.routes.parse_llm_output")
-    @patch("api.routes.generate_docx")
-    def test_generates_docx(self, mock_docx, mock_parse, mock_gen, client, mock_llms):
+    def test_generates_docx(self, client, mock_llms):
         session_id, _ = self._setup_completed_stage2(client, mock_llms)
 
-        # Mock generation pipeline
-        mock_result = MagicMock()
-        mock_result.raw_markdown = "# Handover Document"
-        mock_gen.return_value = mock_result
-
-        mock_doc = MagicMock()
-        mock_parse.return_value = mock_doc
-
-        # Create a real temp file for docx
-        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
-        tmp.write(b"fake docx content")
-        tmp.close()
-        mock_docx.return_value = tmp.name
-
-        try:
-            response = client.post(
-                f"/api/sessions/{session_id}/generate",
-                json={"format": "docx"},
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert "document_id" in data
-            assert "download_url" in data
-            assert data["download_url"].startswith("/api/documents/")
-        finally:
-            os.unlink(tmp.name)
+        # The generate endpoint now starts a background thread and returns immediately
+        response = client.post(
+            f"/api/sessions/{session_id}/generate",
+            json={"format": "docx"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "document_id" in data
+        assert "download_url" in data
+        assert data["status"] == "generating"
+        assert data["download_url"].startswith("/api/documents/")
 
     def test_rejects_incomplete_stage2(self, client, mock_llms):
         from api.session_manager import get_session_store

@@ -4,11 +4,13 @@ import tempfile
 import threading
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
@@ -19,7 +21,6 @@ from agents.stage3_document_generation.generator import GenerationRequest, gener
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
 from config.settings import settings
-from output.exporters.pdf_exporter import generate_pdf
 from output.exporters.word_exporter import generate_docx
 from output.formatters.document_formatter import parse_llm_output
 
@@ -58,6 +59,13 @@ class SessionStatusResponse(BaseModel):
 class GenerateDocumentResponse(BaseModel):
     document_id: str
     download_url: str
+    status: str = "generating"
+
+class GenerationStatusResponse(BaseModel):
+    document_id: str
+    status: str  # "generating" | "complete" | "failed"
+    download_url: Optional[str] = None
+    error: Optional[str] = None
 
 
 # ---- GraphRegistry ----
@@ -142,9 +150,68 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
+# Validate settings on startup
+settings.validate_for_production()
+
+# Serve frontend static files in production
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="static-assets")
+
 # Module-level singletons
 _registry = GraphRegistry()
 _document_store: Dict[str, str] = {}  # document_id -> file_path
+_generation_jobs: Dict[str, Dict[str, Any]] = {}  # document_id -> {status, download_url, error}
+
+
+# ---- Background Generation Worker ----
+
+def _run_generation_in_background(
+    document_id: str,
+    session_id: str,
+    gen_request: GenerationRequest,
+    profile: Any,
+    output_format: str,
+):
+    """Run document generation in a background thread."""
+    try:
+        gen_result = generate_document(gen_request)
+
+        # Parse and export
+        interim_doc = parse_llm_output(gen_result.raw_markdown, profile, session_id)
+
+        output_dir = tempfile.mkdtemp(prefix="kk_")
+
+        if output_format == "pdf":
+            try:
+                from output.exporters.pdf_exporter import generate_pdf
+                file_path = os.path.join(output_dir, f"{document_id}.pdf")
+                file_path = generate_pdf(interim_doc, file_path)
+            except (ImportError, RuntimeError) as e:
+                logger.warning("PDF export unavailable (%s), falling back to DOCX", e)
+                file_path = os.path.join(output_dir, f"{document_id}.docx")
+                file_path = generate_docx(interim_doc, file_path)
+        else:
+            file_path = os.path.join(output_dir, f"{document_id}.docx")
+            file_path = generate_docx(interim_doc, file_path)
+
+        _document_store[document_id] = file_path
+        _generation_jobs[document_id] = {
+            "status": "complete",
+            "download_url": f"/api/documents/{document_id}",
+            "error": None,
+        }
+
+        on_document_generated(session_id, document_id, file_path)
+        logger.info("session=%s document=%s format=%s generation=complete", session_id, document_id, output_format)
+
+    except Exception as e:
+        logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
+        _generation_jobs[document_id] = {
+            "status": "failed",
+            "download_url": None,
+            "error": str(e),
+        }
 
 
 # ---- Endpoints ----
@@ -306,6 +373,7 @@ def get_session_status(session_id: str):
 
 @app.post("/api/sessions/{session_id}/generate", response_model=GenerateDocumentResponse)
 def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest):
+    """Start document generation in the background. Returns a document_id for polling."""
     store = get_session_store()
 
     session = store.get_session(session_id)
@@ -344,30 +412,44 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
         block_depths=state.get("block_depths", {}),
     )
 
-    gen_result = generate_document(gen_request)
-
-    # Parse and export
-    interim_doc = parse_llm_output(gen_result.raw_markdown, profile, session_id)
-
-    output_dir = tempfile.mkdtemp(prefix="kk_")
     document_id = str(uuid.uuid4())
     output_format = request.format or settings.default_output_format
 
-    if output_format == "pdf":
-        file_path = os.path.join(output_dir, f"{document_id}.pdf")
-        file_path = generate_pdf(interim_doc, file_path)
-    else:
-        file_path = os.path.join(output_dir, f"{document_id}.docx")
-        file_path = generate_docx(interim_doc, file_path)
+    # Track the job
+    _generation_jobs[document_id] = {
+        "status": "generating",
+        "download_url": None,
+        "error": None,
+    }
 
-    _document_store[document_id] = file_path
+    # Run in background thread
+    thread = threading.Thread(
+        target=_run_generation_in_background,
+        args=(document_id, session_id, gen_request, profile, output_format),
+        daemon=True,
+    )
+    thread.start()
 
-    on_document_generated(session_id, document_id, file_path)
-
-    logger.info("session=%s document=%s format=%s", session_id, document_id, output_format)
+    logger.info("session=%s document=%s format=%s generation=started", session_id, document_id, output_format)
     return GenerateDocumentResponse(
         document_id=document_id,
         download_url=f"/api/documents/{document_id}",
+        status="generating",
+    )
+
+
+@app.get("/api/documents/{document_id}/status", response_model=GenerationStatusResponse)
+def get_generation_status(document_id: str):
+    """Poll for document generation status."""
+    job = _generation_jobs.get(document_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Document generation job not found")
+
+    return GenerationStatusResponse(
+        document_id=document_id,
+        status=job["status"],
+        download_url=job.get("download_url"),
+        error=job.get("error"),
     )
 
 
@@ -382,3 +464,18 @@ def download_document(document_id: str):
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     return FileResponse(path=file_path, filename=filename, media_type=media_type)
+
+
+# ---- SPA Fallback (must be last) ----
+# Serve index.html for all non-API routes so React Router handles them
+if _FRONTEND_DIST.exists():
+    _index_html = (_FRONTEND_DIST / "index.html").read_text()
+
+    @app.get("/{full_path:path}")
+    def serve_spa(full_path: str):
+        # If the path maps to a real file in dist, serve it
+        file_path = _FRONTEND_DIST / full_path
+        if full_path and file_path.exists() and file_path.is_file():
+            return FileResponse(str(file_path))
+        # Otherwise serve index.html for client-side routing
+        return HTMLResponse(_index_html)
