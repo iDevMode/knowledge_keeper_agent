@@ -1,56 +1,177 @@
-import json
 import logging
-from typing import Any, Dict
+import math
+from typing import Any, Dict, List
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.stage2_employee_interview.prompts import (
+    ANSWER_ANALYSIS_PROMPT_TEMPLATE,
     BLOCK_QUESTIONS,
     CLOSING_MESSAGE,
     CLOSING_QUESTIONS,
-    RISK_FLAG_CLASSIFIER_PROMPT_TEMPLATE,
+    FOLLOWUP_CLASSIFIER_PROMPT_TEMPLATE,
+    PROGRESS_INSTRUCTION_TEMPLATE,
     ROLE_ORIENTATION_QUESTIONS,
     SINGLE_QUESTION_REPROMPT,
+    build_captured_context,
+    build_entity_sweep_instruction,
     build_greeting_message,
     build_system_prompt,
 )
 from agents.stage2_employee_interview.state import Stage2State
 from api.session_manager import get_session_store
+from config import llm_provider
 from config.constants import (
+    ENTITY_SWEEP_MAX_QUESTIONS,
     LIGHT_TOUCH_MAX_QUESTIONS,
     MAX_FOLLOWUPS_PER_QUESTION,
+    OVER_BUDGET_LIGHT_BLOCK_QUESTIONS,
+    QUESTION_BUDGET_HARD_CAP_FACTOR,
+    QUESTION_BUDGET_HEADROOM,
     STAGE2_BLOCK_QUESTION_COUNTS,
     STAGE2_CLOSING_QUESTION_COUNT,
     STAGE2_ROLE_ORIENTATION_QUESTION_COUNT,
+    EntityImportance,
+    InformationGain,
     KnowledgeBlock,
 )
-from config.settings import settings
+from models.classifier_outputs import AnswerAnalysis, FollowupDecision
+from models.entity_memory import (
+    entity_context_lines,
+    mark_probed,
+    merge_entities,
+    unprobed_entities,
+)
 from models.knowledge_blocks import determine_block_order_and_depth
 from models.risk_flags import RiskFlag
 
 logger = logging.getLogger(__name__)
 
 
-def _get_primary_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.primary_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=2048,
-    )
+def _get_primary_llm():
+    return llm_provider.get_primary_llm(max_tokens=2048)
 
 
-def _get_classifier_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.classifier_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=512,
-    )
+def _get_classifier_llm():
+    return llm_provider.get_classifier_llm(max_tokens=512)
+
+
+# ---- Turn budget & progress ----
+
+def _block_question_count(block: str, depth: str) -> int:
+    try:
+        count = STAGE2_BLOCK_QUESTION_COUNTS.get(KnowledgeBlock(block), 5)
+    except ValueError:
+        count = 5
+    if depth == "light":
+        count = min(LIGHT_TOUCH_MAX_QUESTIONS, count)
+    return count
+
+
+def planned_question_total(block_order: List[str], block_depths: Dict[str, str]) -> int:
+    """Main-path question count: orientation + blocks at their depth + closing."""
+    total = STAGE2_ROLE_ORIENTATION_QUESTION_COUNT + STAGE2_CLOSING_QUESTION_COUNT
+    for block in block_order:
+        total += _block_question_count(block, block_depths.get(block, "full"))
+    return total
+
+
+def compute_question_budget(block_order: List[str], block_depths: Dict[str, str]) -> int:
+    """Total agent-question budget: planned questions plus headroom that
+    absorbs follow-ups. Beyond it the interview tightens; at the hard cap it
+    jumps to the closing sequence."""
+    return math.ceil(planned_question_total(block_order, block_depths) * QUESTION_BUDGET_HEADROOM)
+
+
+def _hard_cap(question_budget: int) -> int:
+    return math.ceil(question_budget * QUESTION_BUDGET_HARD_CAP_FACTOR)
+
+
+def _over_budget(state: Stage2State) -> bool:
+    budget = state.get("question_budget", 0)
+    return budget > 0 and state.get("question_count", 0) >= budget
+
+
+def _at_hard_cap(state: Stage2State) -> bool:
+    budget = state.get("question_budget", 0)
+    return budget > 0 and state.get("question_count", 0) >= _hard_cap(budget)
+
+
+def compute_progress(state: Stage2State) -> Dict[str, Any]:
+    """Deterministic interview progress — drives the honest progress UI and
+    the micro-summaries spoken at block transitions."""
+    block_order = state.get("block_order", [])
+    block_depths = state.get("block_depths", {})
+    phase = state.get("current_phase", "role_orientation")
+    index = state.get("current_question_index", 0)
+
+    # Sections: orientation + each knowledge block + closing (sweep folds into closing)
+    section_total = 1 + len(block_order) + 1
+    planned_total = planned_question_total(block_order, block_depths)
+
+    if phase == "role_orientation":
+        section_number = 1
+        questions_done = min(index, STAGE2_ROLE_ORIENTATION_QUESTION_COUNT)
+    elif phase == "knowledge_blocks":
+        block_index = state.get("current_block_index", 0)
+        section_number = 2 + block_index
+        questions_done = STAGE2_ROLE_ORIENTATION_QUESTION_COUNT
+        for block in block_order[:block_index]:
+            questions_done += _block_question_count(block, block_depths.get(block, "full"))
+        questions_done += index
+    else:  # entity_sweep or closing_sequence
+        section_number = section_total
+        questions_done = planned_total - STAGE2_CLOSING_QUESTION_COUNT
+        if phase == "closing_sequence":
+            questions_done += min(index, STAGE2_CLOSING_QUESTION_COUNT)
+
+    percent = int(100 * questions_done / planned_total) if planned_total else 0
+    if state.get("session_complete"):
+        percent = 100
+    else:
+        percent = min(percent, 99)
+
+    return {
+        "phase": phase,
+        "section_number": section_number,
+        "section_total": section_total,
+        "percent": percent,
+        "questions_asked": state.get("question_count", 0),
+        "question_budget": state.get("question_budget", 0),
+    }
 
 
 def validate_single_question(text: str) -> bool:
     """Check that the text contains at most one question mark."""
     return text.count("?") <= 1
+
+
+def invoke_with_single_question_retry(llm, messages: list, session_id: str) -> str:
+    """Invoke the LLM, re-prompting once if it asks multiple questions.
+
+    The retry is re-validated too: if it is still invalid, the attempt with
+    fewer question marks is used and a violation is logged for monitoring.
+    """
+    response = llm.invoke(messages)
+    first_text = response.content
+    if validate_single_question(first_text):
+        return first_text
+
+    logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
+    retry_messages = [
+        *messages,
+        AIMessage(content=first_text),
+        HumanMessage(content=SINGLE_QUESTION_REPROMPT),
+    ]
+    retry_text = llm.invoke(retry_messages).content
+    if validate_single_question(retry_text):
+        return retry_text
+
+    logger.error(
+        "session=%s event=single_question_violation both attempts contained multiple questions",
+        session_id,
+    )
+    return min(first_text, retry_text, key=lambda t: t.count("?"))
 
 
 def load_profile_node(state: Stage2State) -> Dict[str, Any]:
@@ -76,12 +197,17 @@ def load_profile_node(state: Stage2State) -> Dict[str, Any]:
     block_order = [block.value for block in ordered_blocks]
     block_depths = {block.value: depth.value for block, depth in depth_map.items()}
 
-    logger.info("session=%s stage=2 block_order=%s", session_id, block_order)
+    question_budget = compute_question_budget(block_order, block_depths)
+    logger.info(
+        "session=%s stage=2 block_order=%s question_budget=%d",
+        session_id, block_order, question_budget,
+    )
 
     return {
         "profile": profile,
         "block_order": block_order,
         "block_depths": block_depths,
+        "question_budget": question_budget,
     }
 
 
@@ -105,6 +231,9 @@ def greeting_node(state: Stage2State) -> Dict[str, Any]:
         "pending_followup": None,
         "answers": {},
         "risk_flags": [],
+        "entities": {},
+        "sweep_questions": [],
+        "question_count": 1,  # the greeting contains question 0
         "session_complete": False,
     }
 
@@ -126,6 +255,8 @@ def ask_question_node(state: Stage2State) -> Dict[str, Any]:
         questions = ROLE_ORIENTATION_QUESTIONS
     elif phase == "closing_sequence":
         questions = CLOSING_QUESTIONS
+    elif phase == "entity_sweep":
+        questions = state.get("sweep_questions", [])
     else:
         questions = BLOCK_QUESTIONS.get(block, [])
 
@@ -134,9 +265,35 @@ def ask_question_node(state: Stage2State) -> Dict[str, Any]:
 
     instruction = questions[index]
 
+    extras = []
+    # Micro-summary at each knowledge-block transition: acknowledge the topic
+    # just finished and say honestly how far through we are.
+    if phase == "knowledge_blocks" and index == 0:
+        progress = compute_progress(state)
+        extras.append(
+            PROGRESS_INSTRUCTION_TEMPLATE.format(
+                section_number=progress["section_number"],
+                section_total=progress["section_total"],
+                percent=progress["percent"],
+            )
+        )
+    # Entity memory: things mentioned earlier that no question has explored yet.
+    entities = state.get("entities", {})
+    if phase in ("knowledge_blocks", "entity_sweep"):
+        entity_lines = entity_context_lines(entities)
+        if entity_lines:
+            extras.append(
+                "## ENTITY MEMORY\n\n"
+                "The employee mentioned these earlier, but no question has explored them yet:\n"
+                + "\n".join(entity_lines)
+                + "\nIf the current question naturally relates to one of these, refer to it "
+                "by name rather than asking generically."
+            )
+
+    extras_text = ("\n\n" + "\n\n".join(extras)) if extras else ""
     system_prompt = build_system_prompt(state["profile"])
     combined_system = (
-        f"{system_prompt}\n\n"
+        f"{system_prompt}{extras_text}\n\n"
         f"## CURRENT INSTRUCTION\n\n{instruction}\n\nRemember: ask exactly ONE question."
     )
     messages = [
@@ -145,26 +302,24 @@ def ask_question_node(state: Stage2State) -> Dict[str, Any]:
     ]
 
     llm = _get_primary_llm()
-    response = llm.invoke(messages)
-    response_text = response.content
-
-    if not validate_single_question(response_text):
-        logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = invoke_with_single_question_retry(llm, messages, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
         "last_agent_message": response_text,
         "followup_count": 0,
         "pending_followup": None,
+        "entities": mark_probed(entities, response_text),
+        "question_count": state.get("question_count", 0) + 1,
     }
 
 
 def process_answer_node(state: Stage2State) -> Dict[str, Any]:
-    """Store the user's answer keyed by block.index."""
+    """Append the user's answer to the answer list keyed by block.index.
+
+    Answers are lists because follow-up answers land on the same question key —
+    they must accumulate, not overwrite the original answer.
+    """
     block = state["current_block"]
     index = state["current_question_index"]
     session_id = state.get("session_id", "")
@@ -177,16 +332,23 @@ def process_answer_node(state: Stage2State) -> Dict[str, Any]:
 
     answers = dict(state.get("answers", {}))
     key = f"{block}.{index}"
-    answers[key] = answer_text
+    answers[key] = [*answers.get(key, []), answer_text]
 
+    # NOTE: followup_count is deliberately NOT reset here — this node also
+    # processes answers to follow-up questions, and resetting on every answer
+    # would defeat the MAX_FOLLOWUPS_PER_QUESTION limit. The counter resets
+    # when the interview advances (ask_question / advance_question).
     return {
         "answers": answers,
-        "followup_count": 0,
     }
 
 
 def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
-    """Classify the latest answer for risk flags using Haiku."""
+    """Analyse the latest answer with one Haiku call: risk flags + entities.
+
+    Entity extraction rides on the risk-flag call rather than being a second
+    classifier — one structured call per answer keeps latency and cost flat.
+    """
     block = state["current_block"]
     index = state["current_question_index"]
     session_id = state.get("session_id", "")
@@ -207,7 +369,7 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
     if not last_human:
         return {}
 
-    prompt = RISK_FLAG_CLASSIFIER_PROMPT_TEMPLATE.format(
+    prompt = ANSWER_ANALYSIS_PROMPT_TEMPLATE.format(
         block=block,
         question_index=index,
         question=last_ai or "",
@@ -215,21 +377,16 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
     )
 
     try:
-        llm = _get_classifier_llm()
-        response = llm.invoke([HumanMessage(content=prompt)])
-        raw = response.content.strip()
-
-        flags_data = json.loads(raw)
-        if not isinstance(flags_data, list):
-            flags_data = []
+        llm = _get_classifier_llm().with_structured_output(AnswerAnalysis)
+        result = llm.invoke([HumanMessage(content=prompt)])
 
         new_flags = []
-        for flag_data in flags_data:
+        for detected in result.flags:
             flag = RiskFlag(
-                flag_type=flag_data["flag_type"],
-                severity=flag_data["severity"],
-                description=flag_data["description"],
-                recommended_action=flag_data["recommended_action"],
+                flag_type=detected.flag_type,
+                severity=detected.severity,
+                description=detected.description,
+                recommended_action=detected.recommended_action,
                 source_block=block,
                 source_question_index=index,
             )
@@ -239,11 +396,24 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
                 session_id, flag.flag_type, flag.severity, block,
             )
 
-        existing_flags = list(state.get("risk_flags", []))
-        return {"risk_flags": existing_flags + new_flags}
+        updates: Dict[str, Any] = {
+            "risk_flags": list(state.get("risk_flags", [])) + new_flags,
+        }
+        if result.entities:
+            updates["entities"] = merge_entities(
+                state.get("entities", {}), result.entities, block
+            )
+            logger.info(
+                "session=%s stage=2 entities extracted=%d tracked=%d",
+                session_id, len(result.entities), len(updates["entities"]),
+            )
+        return updates
 
     except Exception as e:
-        logger.warning("session=%s Risk flag classifier failed: %s — returning unchanged", session_id, e)
+        logger.error(
+            "session=%s event=classifier_failure classifier=answer_analysis error=%s — returning unchanged",
+            session_id, e,
+        )
         return {}
 
 
@@ -276,38 +446,43 @@ def followup_classifier_node(state: Stage2State) -> Dict[str, Any]:
     if not last_human or not last_ai:
         return {"pending_followup": None}
 
-    classifier_prompt = f"""\
-You are a follow-up classifier. Given a question and answer from an employee knowledge extraction \
-interview, decide whether a follow-up question is needed.
-
-A follow-up is needed when:
-- The answer is vague or generic
-- The answer hints at something deeper that wasn't fully explained
-- Key details are missing that would be important for the handover
-
-A follow-up is NOT needed when:
-- The answer is clear and substantive
-- The person said "I don't know" (respect that and move on)
-- The answer is a straightforward factual response
-
-Question asked: {last_ai}
-
-Answer received: {last_human}
-
-Respond with ONLY a JSON object (no markdown, no explanation):
-{{"needs_followup": true/false, "reason": "brief reason", "suggested_followup": "the follow-up question to ask if needed"}}
-"""
+    classifier_prompt = FOLLOWUP_CLASSIFIER_PROMPT_TEMPLATE.format(
+        block=block,
+        question=last_ai,
+        answer=last_human,
+        captured_context=build_captured_context(state.get("answers", {}), block),
+    )
 
     try:
-        llm = _get_classifier_llm()
-        response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = json.loads(response.content.strip())
+        llm = _get_classifier_llm().with_structured_output(FollowupDecision)
+        result = llm.invoke([HumanMessage(content=classifier_prompt)])
 
-        if result.get("needs_followup", False):
-            return {"pending_followup": result.get("suggested_followup", "")}
-        return {"pending_followup": None}
+        if result.is_refusal or not result.needs_followup or not result.suggested_followup:
+            return {"pending_followup": None}
+
+        gain = result.information_gain
+        if gain in (InformationGain.NONE, InformationGain.LOW):
+            logger.info(
+                "session=%s stage=2 followup suppressed: information_gain=%s",
+                session_id, gain.value,
+            )
+            return {"pending_followup": None}
+
+        # Over the turn budget, only chase clearly-important gaps.
+        if _over_budget(state) and gain != InformationGain.HIGH:
+            logger.info(
+                "session=%s stage=2 followup suppressed: over budget (count=%d budget=%d gain=%s)",
+                session_id, state.get("question_count", 0),
+                state.get("question_budget", 0), gain.value,
+            )
+            return {"pending_followup": None}
+
+        return {"pending_followup": result.suggested_followup}
     except Exception as e:
-        logger.warning("session=%s Followup classifier failed: %s — defaulting to no followup", session_id, e)
+        logger.error(
+            "session=%s event=classifier_failure classifier=followup error=%s — defaulting to no followup",
+            session_id, e,
+        )
         return {"pending_followup": None}
 
 
@@ -334,19 +509,54 @@ def followup_question_node(state: Stage2State) -> Dict[str, Any]:
     ]
 
     llm = _get_primary_llm()
-    response = llm.invoke(messages)
-    response_text = response.content
-
-    if not validate_single_question(response_text):
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = invoke_with_single_question_retry(llm, messages, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
         "last_agent_message": response_text,
         "followup_count": followup_count + 1,
+        "pending_followup": None,
+        "entities": mark_probed(state.get("entities", {}), response_text),
+        "question_count": state.get("question_count", 0) + 1,
+    }
+
+
+def _transition_to_sweep_or_closing(state: Stage2State) -> Dict[str, Any]:
+    """After the knowledge blocks: probe the most important entities that were
+    mentioned but never explored (if turn budget allows), then close."""
+    session_id = state.get("session_id", "")
+
+    if not _at_hard_cap(state):
+        high_unprobed = [
+            e for e in unprobed_entities(state.get("entities", {}))
+            if e.importance == EntityImportance.HIGH
+        ]
+        sweep = [
+            build_entity_sweep_instruction(e.model_dump())
+            for e in high_unprobed[:ENTITY_SWEEP_MAX_QUESTIONS]
+        ]
+        if sweep:
+            logger.info(
+                "session=%s stage=2 entity_sweep targets=%s",
+                session_id, [e.name for e in high_unprobed[:ENTITY_SWEEP_MAX_QUESTIONS]],
+            )
+            return {
+                "current_phase": "entity_sweep",
+                "current_block": "entity_sweep",
+                "current_question_index": 0,
+                "current_block_index": 0,
+                "sweep_questions": sweep,
+                "followup_count": 0,
+                "pending_followup": None,
+            }
+
+    logger.info("session=%s stage=2 advancing to closing", session_id)
+    return {
+        "current_phase": "closing_sequence",
+        "current_block": "closing_sequence",
+        "current_question_index": 0,
+        "current_block_index": 0,
+        "followup_count": 0,
         "pending_followup": None,
     }
 
@@ -359,6 +569,15 @@ def advance_question_node(state: Stage2State) -> Dict[str, Any]:
     session_id = state.get("session_id", "")
 
     next_index = index + 1
+
+    # Hard turn cap: the employee's attention is spent — skip whatever main-path
+    # questions remain and wrap up (entity sweep is skipped too, closing still runs).
+    if phase in ("role_orientation", "knowledge_blocks") and _at_hard_cap(state):
+        logger.warning(
+            "session=%s stage=2 hard question cap reached (count=%d budget=%d) — jumping to closing",
+            session_id, state.get("question_count", 0), state.get("question_budget", 0),
+        )
+        return _transition_to_sweep_or_closing(state)
 
     if phase == "role_orientation":
         if next_index < STAGE2_ROLE_ORIENTATION_QUESTION_COUNT:
@@ -395,18 +614,12 @@ def advance_question_node(state: Stage2State) -> Dict[str, Any]:
     elif phase == "knowledge_blocks":
         block_depths = state.get("block_depths", {})
         depth = block_depths.get(block, "full")
+        max_questions = _block_question_count(block, depth)
 
-        # Determine max questions for this block
-        try:
-            block_enum = KnowledgeBlock(block)
-            total_for_block = STAGE2_BLOCK_QUESTION_COUNTS.get(block_enum, 5)
-        except ValueError:
-            total_for_block = 5
-
-        if depth == "light":
-            max_questions = min(LIGHT_TOUCH_MAX_QUESTIONS, total_for_block)
-        else:
-            max_questions = total_for_block
+        # Over the soft budget, light-touch blocks shrink to their single most
+        # valuable question — priority blocks keep their full depth.
+        if depth == "light" and _over_budget(state):
+            max_questions = min(max_questions, OVER_BUDGET_LIGHT_BLOCK_QUESTIONS)
 
         if next_index < max_questions:
             logger.info("session=%s stage=2 advancing to %s.%d", session_id, block, next_index)
@@ -432,8 +645,19 @@ def advance_question_node(state: Stage2State) -> Dict[str, Any]:
                 "pending_followup": None,
             }
 
-        # All blocks done — transition to closing
-        logger.info("session=%s stage=2 all blocks complete, advancing to closing", session_id)
+        # All blocks done — entity sweep (if warranted), then closing
+        logger.info("session=%s stage=2 all blocks complete", session_id)
+        return _transition_to_sweep_or_closing(state)
+
+    elif phase == "entity_sweep":
+        if next_index < len(state.get("sweep_questions", [])):
+            logger.info("session=%s stage=2 advancing to entity_sweep.%d", session_id, next_index)
+            return {
+                "current_question_index": next_index,
+                "followup_count": 0,
+                "pending_followup": None,
+            }
+        logger.info("session=%s stage=2 entity sweep complete, advancing to closing", session_id)
         return {
             "current_phase": "closing_sequence",
             "current_block": "closing_sequence",

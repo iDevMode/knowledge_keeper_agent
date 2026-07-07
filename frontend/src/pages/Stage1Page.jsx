@@ -14,10 +14,13 @@ export default function Stage1Page() {
     loading,
     sessionComplete,
     profile,
+    inviteToken,
+    managerToken,
     currentBlock,
     error,
     sendMessage,
     addAgentMessage,
+    restoreHistory,
     setCurrentBlock,
   } = useChat(sessionId)
 
@@ -29,8 +32,11 @@ export default function Stage1Page() {
     if (greeting) {
       addAgentMessage(greeting)
       setCurrentBlock('business_context')
+    } else {
+      // Refresh mid-setup — the navigation greeting is gone; restore transcript.
+      restoreHistory()
     }
-  }, [initialized, location.state, addAgentMessage, setCurrentBlock])
+  }, [initialized, location.state, addAgentMessage, restoreHistory, setCurrentBlock])
 
   return (
     <ChatWindow
@@ -47,6 +53,8 @@ export default function Stage1Page() {
           stage={1}
           sessionId={sessionId}
           profile={profile}
+          inviteToken={inviteToken}
+          managerToken={managerToken}
         />
       )}
       {error && (

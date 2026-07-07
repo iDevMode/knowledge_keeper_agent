@@ -32,6 +32,30 @@ class BlockDepth(str, Enum):
     LIGHT = "light"
 
 
+class EntityType(str, Enum):
+    PERSON = "person"
+    CLIENT = "client"
+    SUPPLIER = "supplier"
+    SYSTEM = "system"
+    PROCESS = "process"
+    PROJECT = "project"
+    DOCUMENT = "document"
+    OTHER = "other"
+
+
+class EntityImportance(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class InformationGain(str, Enum):
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class RoleType(str, Enum):
     PROCESS = "process"
     DECISION = "decision"
@@ -93,6 +117,17 @@ MAX_FOLLOWUPS_PER_QUESTION = 3
 STAGE2_ROLE_ORIENTATION_QUESTION_COUNT = 5
 STAGE2_CLOSING_QUESTION_COUNT = 4
 LIGHT_TOUCH_MAX_QUESTIONS = 3
+
+# Entity memory / sweep
+ENTITY_SWEEP_MAX_QUESTIONS = 2  # targeted probes of unprobed entities before closing
+
+# Turn budget (fatigue management). The budget is the planned question count
+# times the headroom factor (headroom absorbs follow-ups). Over budget,
+# follow-ups need HIGH information gain and light blocks shrink to one
+# question. At the hard cap the interview jumps to the closing sequence.
+QUESTION_BUDGET_HEADROOM = 1.35
+QUESTION_BUDGET_HARD_CAP_FACTOR = 1.25  # hard cap = budget * this
+OVER_BUDGET_LIGHT_BLOCK_QUESTIONS = 1
 
 # Number of questions per Stage 2 knowledge block
 STAGE2_BLOCK_QUESTION_COUNTS = {

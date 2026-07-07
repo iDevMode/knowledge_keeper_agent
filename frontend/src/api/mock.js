@@ -61,46 +61,75 @@ function getStage1Block(questionIndex) {
 }
 
 // ── Stage 2 conversation script ──────────────────────────────────────────────
+//
+// Structured to showcase the Phase 2 interview intelligence: entity-aware
+// questions that call back to names mentioned earlier, an explicit information-
+// gain follow-up, a dedicated entity-sweep turn before closing, honest
+// section-of-total progress, and risk flags surfacing as they are detected.
+// Each turn carries the metadata the real /status endpoint returns.
 
-const STAGE2_QUESTIONS = [
-  // Role orientation
-  `Thanks for taking the time to do this — it's genuinely valuable.\n\nTo start, could you describe your role in your own words? What does a typical week look like for you?`,
-  `What are the most important things you do that wouldn't happen if you weren't here?`,
-  `Who are the key people you work with most closely, internally and externally?`,
-  `Are there any recurring meetings, reports, or deadlines that are solely your responsibility?`,
-  `If you could only pass on three things to your replacement, what would they be?`,
-  // Knowledge blocks
-  `Let's dig into your core processes.\n\nWalk me through the most critical process you own from start to finish.`,
-  `Are there any steps in that process that are different from how they're officially documented?`,
-  `What tends to go wrong with this process, and how do you handle it when it does?`,
-  `Are there any tools or systems where you're the only person who really knows how they work?`,
-  `Tell me about the key relationships you've built in this role — clients, partners, stakeholders. Who would your replacement need to build rapport with quickly?`,
-  `Are there any in-flight projects or initiatives that will need to be handed over?`,
-  `What's the current status of each, and what are the next critical milestones?`,
-  `Are there any workarounds, shortcuts, or unofficial processes you've developed that aren't written down anywhere?`,
-  `What are the things that only you know — the stuff that would be lost if we didn't capture it today?`,
-  // Closing
-  `We're nearly done. A few closing questions.\n\nIs there anything we haven't covered that you think your replacement absolutely needs to know?`,
-  `If you could give your replacement one piece of advice for their first month, what would it be?`,
-  `Is there anything you'd want flagged as sensitive or confidential in the handover document?`,
-  `Any final thoughts before we wrap up?`,
+const STAGE2_SECTION_TOTAL = 6
+
+const STAGE2_TURNS = [
+  // ── Section 1 · Role orientation ──
+  { block: 'role_orientation', section: 1,
+    text: `To start, could you describe your role in your own words — not the job-description version, but what you actually spend your time on?` },
+  { block: 'role_orientation', section: 1,
+    text: `What does a typical week look like — the recurring things that happen without fail?` },
+  { block: 'role_orientation', section: 1,
+    text: `What are the two or three things you do that nobody else on the team could pick up immediately?` },
+  { block: 'role_orientation', section: 1,
+    text: `Where does your time actually go — what's the most time-consuming part of the role?` },
+  { block: 'role_orientation', section: 1,
+    text: `Does the workload spike at certain times? If so, when, and why?` },
+
+  // ── Section 2 · Core processes (micro-summary opener + follow-up + risk) ──
+  { block: 'core_processes', section: 2,
+    text: `That gives me a clear picture of the day-to-day — thank you. We're moving into your core processes now (section 2 of 6, about a quarter of the way through).\n\nWalk me through the single most critical process you own, from start to finish.` },
+  { block: 'core_processes', section: 2, followup: true,
+    text: `Just to dig a little deeper on that — are there any steps that only work because of your specific access, relationships, or knowledge?` },
+  { block: 'core_processes', section: 2, risk: true,
+    text: `You mentioned that part isn't fully documented. If you were unavailable for a week, what would break first — and who would even notice?` },
+  { block: 'core_processes', section: 2,
+    text: `When this process goes wrong, how do you catch it — and how would someone new know what to look for?` },
+
+  // ── Section 3 · Systems & access (risk: sole admin) ──
+  { block: 'tools_and_systems', section: 3,
+    text: `Great — that's your core processes captured. We're about a third of the way through now (section 3 of 6).\n\nWhich systems or tools do you use daily that a successor would need access to on day one?` },
+  { block: 'tools_and_systems', section: 3, risk: true,
+    text: `Are there any systems where you hold the only admin login, or credentials that have never been shared with anyone else?` },
+  { block: 'tools_and_systems', section: 3,
+    text: `Any quirks, known bugs, or "you just have to know" details about those systems that aren't written down?` },
+
+  // ── Section 4 · Key relationships (entity-aware callback + risk) ──
+  { block: 'key_relationships', section: 4,
+    text: `Halfway there (section 4 of 6) — let's talk about people.\n\nWho are the key relationships — clients, partners, stakeholders — that the next person will need to build quickly?` },
+  { block: 'key_relationships', section: 4, risk: true,
+    text: `You mentioned Sarah Chen at Premier Bank earlier. What does that relationship actually depend on, and is it at risk during a transition?` },
+  { block: 'key_relationships', section: 4,
+    text: `Are there any informal relationships — people you go to off the record who quietly get things done?` },
+
+  // ── Section 5 · Undocumented workarounds ──
+  { block: 'undocumented_workarounds', section: 5,
+    text: `Nearly through the main topics now (section 5 of 6).\n\nWhat are the things you just know — shortcuts or workarounds you use that aren't written down anywhere?` },
+  { block: 'undocumented_workarounds', section: 5,
+    text: `Any "if X happens, always do Y" rules you follow from experience that were never formally documented?` },
+
+  // ── Entity sweep · circles back to something mentioned in passing ──
+  { block: 'entity_sweep', section: 6, sweep: true,
+    text: `Before we close — earlier you mentioned the reconciliation macro in passing, but we never dug into it. Who else knows how it works, and where does it actually live?` },
+
+  // ── Section 6 · Closing ──
+  { block: 'closing', section: 6,
+    text: `Is there anything important we haven't covered that your successor absolutely needs to know?` },
+  { block: 'closing', section: 6,
+    text: `If you could give them one piece of advice for their first month — something that isn't in any document — what would it be?` },
+  { block: 'closing', section: 6,
+    text: `Last one: is there anything here you'd want flagged as sensitive or confidential in the handover document?` },
 ]
 
-const STAGE2_BLOCKS = [
-  { name: 'role_orientation', until: 5 },
-  { name: 'core_processes', until: 8 },
-  { name: 'tools_and_systems', until: 9 },
-  { name: 'key_relationships', until: 10 },
-  { name: 'in_flight_projects', until: 12 },
-  { name: 'undocumented_workarounds', until: 14 },
-  { name: 'closing', until: 999 },
-]
-
-function getStage2Block(questionIndex) {
-  for (const block of STAGE2_BLOCKS) {
-    if (questionIndex < block.until) return block.name
-  }
-  return 'closing'
+function stage2Turn(questionIndex) {
+  return STAGE2_TURNS[Math.min(questionIndex, STAGE2_TURNS.length - 1)]
 }
 
 // ── Mock profile ─────────────────────────────────────────────────────────────
@@ -169,9 +198,9 @@ export async function createStage1Session() {
   return { session_id: sessionId, message: greeting }
 }
 
-export async function createStage2Session(stage1SessionId) {
+export async function createStage2Session(inviteToken, _consentAcknowledged = true) {
   await delay(800)
-  const sessionId = createSession(2, stage1SessionId)
+  const sessionId = createSession(2, inviteToken)
   const greeting = `Hi there. Thanks for agreeing to take part in this knowledge capture session — I really appreciate your time.\n\nThis conversation is designed to help capture the important knowledge you carry in your role, so that your team and your successor have the best possible foundation going forward. There are no right or wrong answers — I'm just here to listen and ask the right questions.\n\nEverything you share will be used to create a handover document. You'll have the opportunity to flag anything as confidential.\n\nShall we begin?`
   return { session_id: sessionId, message: greeting }
 }
@@ -182,15 +211,10 @@ export async function sendMessage(sessionId, message) {
   const session = sessions[sessionId]
   if (!session) throw new Error('Session not found')
 
-  const questions = session.stage === 1 ? STAGE1_QUESTIONS : STAGE2_QUESTIONS
+  const total = session.stage === 1 ? STAGE1_QUESTIONS.length : STAGE2_TURNS.length
   const idx = session.questionIndex
 
-  // Stage 2 risk flags — add some at specific question indices
-  if (session.stage === 2 && [6, 8, 13].includes(idx)) {
-    session.riskFlagCount++
-  }
-
-  if (idx >= questions.length) {
+  if (idx >= total) {
     session.complete = true
 
     if (session.stage === 1) {
@@ -198,22 +222,51 @@ export async function sendMessage(sessionId, message) {
         message: `Thank you — I now have everything I need.\n\nI've generated a Role Intelligence Profile based on your answers. Please review the summary and, if everything looks correct, you can share the employee interview link with the departing team member.`,
         session_complete: true,
         profile: MOCK_PROFILE,
+        invite_token: 'mock-invite-' + sessionId,
+        manager_token: 'mock-manager-' + sessionId,
       }
     }
 
     return {
-      message: `Thank you so much for your time and openness today. The knowledge you've shared is incredibly valuable and will make a real difference for your team and successor.\n\nYour handover document is ready to be generated. You can choose your preferred format below.`,
+      message: `Thank you so much for your time and openness today. The knowledge you've shared is incredibly valuable and will make a real difference for your team and successor.\n\nYour answers are being compiled into a structured handover document now — the manager will receive it automatically. You don't need to do anything else.`,
       session_complete: true,
       profile: null,
     }
   }
 
+  let messageText
+  if (session.stage === 1) {
+    messageText = STAGE1_QUESTIONS[idx]
+  } else {
+    const turn = STAGE2_TURNS[idx]
+    messageText = turn.text
+    // Risk flags surface as the agent detects them, exactly as the real
+    // parallel risk-classifier branch would.
+    if (turn.risk) session.riskFlagCount++
+  }
+
   session.questionIndex++
 
   return {
-    message: questions[idx],
+    message: messageText,
     session_complete: false,
     profile: null,
+  }
+}
+
+function stage2Progress(session) {
+  const idx = Math.min(session.questionIndex, STAGE2_TURNS.length - 1)
+  const turn = stage2Turn(idx)
+  const percent = session.complete
+    ? 100
+    : Math.min(Math.round(((idx + 1) / STAGE2_TURNS.length) * 100), 99)
+  return {
+    phase: turn.block === 'closing' || turn.block === 'entity_sweep' ? 'closing_sequence' : 'knowledge_blocks',
+    section_number: turn.section,
+    section_total: STAGE2_SECTION_TOTAL,
+    percent,
+    questions_asked: session.questionIndex,
+    question_budget: STAGE2_TURNS.length + 6,
   }
 }
 
@@ -221,15 +274,33 @@ export async function getSessionStatus(sessionId) {
   const session = sessions[sessionId]
   if (!session) throw new Error('Session not found')
 
-  const getBlock = session.stage === 1 ? getStage1Block : getStage2Block
+  const currentBlock =
+    session.stage === 1 ? getStage1Block(session.questionIndex) : stage2Turn(session.questionIndex).block
 
   return {
     session_id: sessionId,
     stage: session.stage,
     session_complete: session.complete,
-    current_block: getBlock(session.questionIndex),
+    current_block: currentBlock,
     current_question_index: session.questionIndex,
-    risk_flag_count: session.riskFlagCount,
+    progress: session.stage === 2 ? stage2Progress(session) : null,
+  }
+}
+
+export async function getSessionHistory(sessionId) {
+  await delay(300)
+  const session = sessions[sessionId]
+  // Demo mock keeps no server-side transcript; return empty so the page falls
+  // back to its "welcome back" path. Real backend returns the full transcript.
+  if (!session) return { session_id: sessionId, stage: 0, session_complete: false, messages: [] }
+  const currentBlock =
+    session.stage === 1 ? getStage1Block(session.questionIndex) : stage2Turn(session.questionIndex).block
+  return {
+    session_id: sessionId,
+    stage: session.stage,
+    session_complete: session.complete,
+    current_block: currentBlock,
+    messages: [],
   }
 }
 
@@ -334,6 +405,7 @@ The Senior Operations Manager role sits within a team of 8 in the Operations dep
 ## Section 7: Undocumented Workarounds
 
 1. **Reconciliation macro** — Custom Excel macro that catches formatting issues the standard template misses. Stored in personal OneDrive. Needs to be moved to shared drive and documented.
+   [GAP: The macro's source logic was never fully explained — schedule a working session to document it before departure.]
 
 2. **Escalation fast-track** — For urgent client escalations, bypasses the standard Jira workflow by messaging the VP Operations directly on Slack with a specific emoji prefix (🔴) to signal immediate attention needed.
 
@@ -357,25 +429,68 @@ The Senior Operations Manager role sits within a team of 8 in the Operations dep
 
 ---
 
-*Generated by KnowledgeKeeper | Nukode*
+*Generated by KnowledgeKeeper | Nukode — extract-then-compose synthesis, 3 risk flags (de-duplicated), QA review score 0.91/1.0.*
 `
 
 // Store generated blob URLs for cleanup
 const _blobUrls = {}
+const _managerDocs = {} // stage1SessionId -> { document_id, status }
 
-export async function generateDocument(sessionId, format) {
-  await delay(3000)
+function _createMockDocument() {
   const docId = 'mock-doc-' + Math.random().toString(36).slice(2, 8)
-
-  // Create a downloadable blob
   const blob = new Blob([MOCK_DOCUMENT_MARKDOWN], { type: 'text/markdown;charset=utf-8' })
-  const blobUrl = URL.createObjectURL(blob)
-  _blobUrls[docId] = blobUrl
+  _blobUrls[docId] = URL.createObjectURL(blob)
+  return docId
+}
+
+export async function getManagerOverview(stage1SessionId) {
+  await delay(400)
+
+  // Simulate the auto-generated document appearing shortly after completion
+  if (!_managerDocs[stage1SessionId]) {
+    _managerDocs[stage1SessionId] = {
+      document_id: _createMockDocument(),
+      status: 'complete',
+    }
+  }
+  const doc = _managerDocs[stage1SessionId]
 
   return {
-    document_id: docId,
-    download_url: blobUrl,
+    stage1_session_id: stage1SessionId,
+    stage2_status: 'complete',
+    risk_flag_count: 3,
+    document_id: doc.document_id,
+    document_status: doc.status,
+    download_url: _blobUrls[doc.document_id],
+    document_error: null,
+    delivery_email: _deliveryEmails[stage1SessionId] || null,
   }
+}
+
+export async function managerGenerateDocument(stage1SessionId) {
+  await delay(3000)
+  const docId = _createMockDocument()
+  _managerDocs[stage1SessionId] = { document_id: docId, status: 'complete' }
+  return {
+    document_id: docId,
+    download_url: _blobUrls[docId],
+    status: 'complete',
+  }
+}
+
+const _deliveryEmails = {}
+
+export async function setDeliveryEmail(stage1SessionId, token, email) {
+  await delay(400)
+  _deliveryEmails[stage1SessionId] = email
+  return { ok: true, emailed: Boolean(_managerDocs[stage1SessionId]) }
+}
+
+export async function deleteEngagement(stage1SessionId) {
+  await delay(500)
+  delete _managerDocs[stage1SessionId]
+  delete _deliveryEmails[stage1SessionId]
+  return { ok: true, deleted: true }
 }
 
 export function getDownloadUrl(documentId) {

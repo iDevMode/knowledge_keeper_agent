@@ -3,7 +3,9 @@ import * as mock from './mock.js'
 const BASE = '/api'
 
 // Control via VITE_DEMO_MODE env var. Defaults to false (use real backend).
-const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
+// The Vercel preview builds with VITE_DEMO_MODE=true so it runs entirely on
+// the canned mock data below — no backend, no API key required.
+export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
 
 async function request(url, options = {}) {
   const res = await fetch(`${BASE}${url}`, {
@@ -23,11 +25,13 @@ export async function createStage1Session() {
   return res.json()
 }
 
-export async function createStage2Session(stage1SessionId) {
-  if (DEMO_MODE) return mock.createStage2Session(stage1SessionId)
+// The employee link carries a single-use invite token — never the manager's
+// Stage 1 session ID. Requires explicit consent (GDPR).
+export async function createStage2Session(inviteToken, consentAcknowledged = false) {
+  if (DEMO_MODE) return mock.createStage2Session(inviteToken, consentAcknowledged)
   const res = await request('/sessions/stage2', {
     method: 'POST',
-    body: JSON.stringify({ stage1_session_id: stage1SessionId }),
+    body: JSON.stringify({ invite_token: inviteToken, consent_acknowledged: consentAcknowledged }),
   })
   return res.json()
 }
@@ -47,34 +51,56 @@ export async function getSessionStatus(sessionId) {
   return res.json()
 }
 
-export async function generateDocument(sessionId, format = 'docx') {
-  if (DEMO_MODE) return mock.generateDocument(sessionId, format)
-
-  // Start generation (returns immediately)
-  const res = await request(`/sessions/${sessionId}/generate`, {
-    method: 'POST',
-    body: JSON.stringify({ format }),
-  })
-  const data = await res.json()
-
-  // Poll until complete
-  const documentId = data.document_id
-  while (true) {
-    await new Promise((resolve) => setTimeout(resolve, 3000))
-    const statusRes = await request(`/documents/${documentId}/status`)
-    const status = await statusRes.json()
-
-    if (status.status === 'complete') {
-      return { document_id: documentId, download_url: status.download_url }
-    }
-    if (status.status === 'failed') {
-      throw new Error(status.error || 'Document generation failed')
-    }
-    // Still generating — keep polling
-  }
+export async function getSessionHistory(sessionId) {
+  if (DEMO_MODE) return mock.getSessionHistory(sessionId)
+  const res = await request(`/sessions/${sessionId}/history`)
+  return res.json()
 }
 
-export function getDownloadUrl(documentId) {
-  if (DEMO_MODE) return mock.getDownloadUrl(documentId)
-  return `${BASE}/documents/${documentId}`
+// ── Manager-facing (require the manager token) ───────────────────────────────
+
+export async function getManagerOverview(stage1SessionId, token) {
+  if (DEMO_MODE) return mock.getManagerOverview(stage1SessionId, token)
+  const res = await request(
+    `/manager/${stage1SessionId}/handover?token=${encodeURIComponent(token)}`
+  )
+  return res.json()
+}
+
+export async function managerGenerateDocument(stage1SessionId, token, format = 'docx') {
+  if (DEMO_MODE) return mock.managerGenerateDocument(stage1SessionId, token, format)
+  const res = await request(
+    `/manager/${stage1SessionId}/generate?token=${encodeURIComponent(token)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ format }),
+    }
+  )
+  return res.json()
+}
+
+export async function setDeliveryEmail(stage1SessionId, token, email) {
+  if (DEMO_MODE) return mock.setDeliveryEmail(stage1SessionId, token, email)
+  const res = await request(
+    `/manager/${stage1SessionId}/delivery-email?token=${encodeURIComponent(token)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }
+  )
+  return res.json()
+}
+
+export async function deleteEngagement(stage1SessionId, token) {
+  if (DEMO_MODE) return mock.deleteEngagement(stage1SessionId, token)
+  const res = await request(
+    `/manager/${stage1SessionId}?token=${encodeURIComponent(token)}`,
+    { method: 'DELETE' }
+  )
+  return res.json()
+}
+
+export function getDownloadUrl(documentId, token) {
+  if (DEMO_MODE) return mock.getDownloadUrl(documentId, token)
+  return `${BASE}/documents/${documentId}?token=${encodeURIComponent(token)}`
 }

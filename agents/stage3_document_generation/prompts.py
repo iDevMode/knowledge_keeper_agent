@@ -1,9 +1,63 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from agents.stage2_employee_interview.prompts import (
+    BLOCK_QUESTIONS as STAGE2_BLOCK_QUESTIONS,
+    CLOSING_QUESTIONS,
+    ROLE_ORIENTATION_QUESTIONS,
+)
 from models.risk_flags import RiskFlag
 from models.role_intelligence_profile import RoleIntelligenceProfile
+
+
+EXTRACTION_SYSTEM_PROMPT = """\
+You are KnowledgeKeeper's knowledge-extraction pass. You are given a Role Intelligence Profile \
+and the full transcript of an employee handover interview.
+
+Your job is to extract EVERY discrete piece of handover knowledge in the transcript as a separate \
+structured item. This is an inventory pass, not a writing pass — be exhaustive. A successor will \
+rely on this inventory, so a detail you drop here is a detail lost forever.
+
+For each item:
+- Choose the category it belongs in (role_overview, knowledge_transfer, key_relationships, \
+systems_and_access, in_flight_items, decision_making, undocumented_knowledge, advice, onboarding, \
+knowledge_gap).
+- Write the `detail` as clear, synthesised prose the successor can act on — what it is, why it \
+matters, how to do it — never a verbatim quote.
+- List any named entities involved (people, clients, systems, documents).
+- Mark `is_gap: true` for anything the employee could NOT answer, answered only partially, or \
+that was flagged as missing — capture the gap explicitly rather than omitting it.
+- Set importance honestly (critical/high/medium/low).
+
+Extract many small, specific items rather than a few broad ones. Do not merge unrelated facts. \
+Do not invent anything not supported by the transcript.\
+"""
+
+
+COMPOSE_SYSTEM_PROMPT = """\
+You are KnowledgeKeeper's composition pass. You are given the Role Intelligence Profile, a \
+pre-extracted INVENTORY of knowledge items (already grouped by section), and a de-duplicated \
+risk summary.
+
+Your task is to compose the final Handover Intelligence Document from this inventory. Every item \
+in the inventory MUST appear in the document, placed in its section and woven into readable, \
+professional prose — as though written by a senior consultant who understands the role. You are \
+composing a complete inventory into a document; you are not summarising and you must not drop items.
+
+## DOCUMENT GENERATION RULES
+
+- Write in clear, professional prose. Use headers and sub-sections for navigation. Use bullet \
+points only for lists of items (contacts, tools, tasks) — never for narrative content.
+- Write for the incoming replacement — assume they are competent but have no prior context about \
+this specific business, role, or environment.
+- Items marked as gaps must be surfaced with [GAP: brief description of what is missing] — never \
+gloss over them.
+- The de-duplicated risk summary appears prominently in the Risk Summary section at the top.
+- Calibrate the depth of each section to the knowledge priority ranking from Stage 1.
+- Each section MUST begin with the exact sentinel marker format: ### SECTION: [Section Name]
+- Do not use any other heading format for section delimiters.\
+"""
 
 
 STAGE3_SYSTEM_PROMPT = """\
@@ -72,7 +126,7 @@ def build_context_block(
     profile: RoleIntelligenceProfile,
     conversation_history: List[BaseMessage],
     risk_flags: List[RiskFlag],
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     block_order: List[str],
     block_depths: Dict[str, str],
 ) -> str:
@@ -102,6 +156,75 @@ def build_context_block(
     parts.append("\n")
     parts.append(_build_generation_instruction(profile, answers, risk_flags))
 
+    return "\n".join(parts)
+
+
+def build_extraction_context(
+    profile: RoleIntelligenceProfile,
+    conversation_history: List[BaseMessage],
+    answers: Dict[str, Any],
+    block_order: List[str],
+    block_depths: Dict[str, str],
+) -> str:
+    """Context for the extraction pass: profile + full transcript, no writing
+    instruction — the extractor's job is defined entirely by its system prompt
+    and the structured-output schema."""
+    parts = [
+        "## ROLE INTELLIGENCE PROFILE\n",
+        _format_profile_for_context(profile),
+        "\n## INTERVIEW TRANSCRIPT BY BLOCK\n",
+        _format_answers_by_block(answers, block_order, block_depths),
+    ]
+    excerpts = _format_conversation_excerpts(conversation_history)
+    if excerpts:
+        parts.append("\n## KEY CONVERSATION EXCHANGES\n")
+        parts.append(excerpts)
+    parts.append(
+        "\n## INSTRUCTION\n\nExtract every discrete knowledge item from the "
+        "transcript above as structured items. Be exhaustive."
+    )
+    return "\n".join(parts)
+
+
+def _format_extracted_items(items: List[Any]) -> str:
+    """Render extracted KnowledgeItems grouped by category for the composer."""
+    if not items:
+        return "(no items extracted)"
+
+    by_category: Dict[str, List[Any]] = {}
+    for item in items:
+        by_category.setdefault(item.category, []).append(item)
+
+    lines = []
+    for category, group in by_category.items():
+        lines.append(f"### {category.replace('_', ' ').title()}")
+        for item in group:
+            gap = " [GAP]" if item.is_gap else ""
+            entities = f" (entities: {', '.join(item.entities)})" if item.entities else ""
+            lines.append(f"- [{item.importance}]{gap} {item.title}: {item.detail}{entities}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_compose_context(
+    profile: RoleIntelligenceProfile,
+    items: List[Any],
+    risk_flags: List[RiskFlag],
+    answers: Dict[str, Any],
+) -> str:
+    """Context for the composition pass: profile + extracted inventory +
+    de-duplicated risks + the section-by-section generation instruction."""
+    parts = [
+        "## ROLE INTELLIGENCE PROFILE\n",
+        _format_profile_for_context(profile),
+    ]
+    if risk_flags:
+        parts.append("\n## DE-DUPLICATED RISK FLAGS\n")
+        parts.append(_format_risk_flags(risk_flags))
+    parts.append("\n## EXTRACTED KNOWLEDGE INVENTORY\n")
+    parts.append(_format_extracted_items(items))
+    parts.append("\n")
+    parts.append(_build_generation_instruction(profile, answers, risk_flags))
     return "\n".join(parts)
 
 
@@ -188,44 +311,72 @@ def _format_risk_flags(risk_flags: List[RiskFlag]) -> str:
     return "\n".join(lines)
 
 
+def _question_instruction(block: str, index: int) -> Optional[str]:
+    """Look up the question instruction that produced a given answer key."""
+    if block == "role_orientation":
+        questions = ROLE_ORIENTATION_QUESTIONS
+    elif block == "closing_sequence":
+        questions = CLOSING_QUESTIONS
+    else:
+        questions = STAGE2_BLOCK_QUESTIONS.get(block, [])
+    if 0 <= index < len(questions):
+        return questions[index]
+    return None
+
+
+def _format_answer_entries(block: str, key: str, value: Union[str, List[str]]) -> List[str]:
+    """Format one question's answers, including the question that was asked.
+
+    The question text is essential context — without it the synthesis model
+    only sees 'Q3: <answer>' and has to guess what was asked. Answers are lists
+    (original answer plus follow-up answers); plain strings are accepted for
+    backward compatibility with older fixtures.
+    """
+    index = int(key.split(".")[1])
+    lines = []
+
+    question = _question_instruction(block, index)
+    if question:
+        lines.append(f"Q{index} (question asked): {question}")
+    else:
+        lines.append(f"Q{index}:")
+
+    answer_list = value if isinstance(value, list) else [value]
+    for i, answer in enumerate(answer_list):
+        label = "A" if i == 0 else "A (follow-up)"
+        lines.append(f"{label}: {answer}")
+
+    return lines
+
+
 def _format_answers_by_block(
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     block_order: List[str],
     block_depths: Dict[str, str],
 ) -> str:
-    """Group answers by block in priority order."""
+    """Group answers by block in priority order, as question/answer pairs."""
     lines = []
 
-    # Role orientation first
-    orientation_answers = {k: v for k, v in answers.items() if k.startswith("role_orientation.")}
-    if orientation_answers:
-        lines.append("### Role Orientation")
-        for key in sorted(orientation_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {orientation_answers[key]}")
+    def _append_block(block: str, heading: str) -> None:
+        block_answers = {k: v for k, v in answers.items() if k.startswith(f"{block}.")}
+        if not block_answers:
+            return
+        lines.append(heading)
+        for key in sorted(block_answers.keys(), key=lambda k: int(k.split(".")[1])):
+            lines.extend(_format_answer_entries(block, key, block_answers[key]))
         lines.append("")
+
+    # Role orientation first
+    _append_block("role_orientation", "### Role Orientation")
 
     # Knowledge blocks in priority order
     for block in block_order:
-        block_answers = {k: v for k, v in answers.items() if k.startswith(f"{block}.")}
-        if not block_answers:
-            continue
         depth = block_depths.get(block, "full")
         label = block.replace("_", " ").title()
-        lines.append(f"### {label} [{depth} depth]")
-        for key in sorted(block_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {block_answers[key]}")
-        lines.append("")
+        _append_block(block, f"### {label} [{depth} depth]")
 
     # Closing sequence
-    closing_answers = {k: v for k, v in answers.items() if k.startswith("closing_sequence.")}
-    if closing_answers:
-        lines.append("### Closing Questions")
-        for key in sorted(closing_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {closing_answers[key]}")
-        lines.append("")
+    _append_block("closing_sequence", "### Closing Questions")
 
     return "\n".join(lines)
 
@@ -250,7 +401,7 @@ def _format_conversation_excerpts(conversation_history: List[BaseMessage]) -> st
 
 def _build_generation_instruction(
     profile: RoleIntelligenceProfile,
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     risk_flags: List[RiskFlag],
 ) -> str:
     """Build the generation instruction with profile-specific values."""

@@ -1,23 +1,29 @@
 import logging
 import os
+import shutil
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from agents.stage1_business_interview.graph import build_stage1_graph
 from agents.stage2_employee_interview.graph import build_stage2_graph
 from agents.stage3_document_generation.generator import GenerationRequest, generate_document
+from api.persistence.checkpointer import create_checkpointer
+from api.notifications import create_email_sender, deliver_handover
+from api.persistence.document_registry import create_document_registry
+from api.persistence.document_store import create_blob_store
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
 from config.settings import settings
@@ -30,13 +36,20 @@ logger = logging.getLogger(__name__)
 # ---- Request / Response Models ----
 
 class CreateStage2Request(BaseModel):
-    stage1_session_id: str
+    # Employee sessions are created from a single-use invite token, never from
+    # the Stage 1 session ID — the manager's session must stay private.
+    invite_token: str
+    # GDPR: the employee must explicitly consent before the interview begins.
+    consent_acknowledged: bool = False
 
 class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=10000)
 
 class GenerateDocumentRequest(BaseModel):
     format: str = Field(default="docx", pattern=r"^(docx|pdf)$")
+
+class SetDeliveryEmailRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
 
 class SessionCreatedResponse(BaseModel):
     session_id: str
@@ -46,6 +59,9 @@ class MessageResponse(BaseModel):
     message: str
     session_complete: bool = False
     profile: Optional[dict] = None
+    # Returned once, on Stage 1 completion (manager's own session):
+    invite_token: Optional[str] = None    # share link for the employee
+    manager_token: Optional[str] = None   # gates document generation/download
 
 class SessionStatusResponse(BaseModel):
     session_id: str
@@ -53,8 +69,19 @@ class SessionStatusResponse(BaseModel):
     session_complete: bool
     current_block: Optional[str] = None
     current_question_index: Optional[int] = None
-    linked_session_id: Optional[str] = None
-    risk_flag_count: Optional[int] = None
+    # Stage 2 only: honest progress (section n of m, percent, turn budget)
+    progress: Optional[Dict[str, Any]] = None
+
+class HistoryMessage(BaseModel):
+    role: str  # "agent" | "user"
+    content: str
+
+class SessionHistoryResponse(BaseModel):
+    session_id: str
+    stage: int
+    session_complete: bool
+    current_block: Optional[str] = None
+    messages: List[HistoryMessage] = []
 
 class GenerateDocumentResponse(BaseModel):
     document_id: str
@@ -67,6 +94,16 @@ class GenerationStatusResponse(BaseModel):
     download_url: Optional[str] = None
     error: Optional[str] = None
 
+class ManagerOverviewResponse(BaseModel):
+    stage1_session_id: str
+    stage2_status: str  # "not_started" | "in_progress" | "complete"
+    risk_flag_count: Optional[int] = None
+    document_id: Optional[str] = None
+    document_status: Optional[str] = None  # "generating" | "complete" | "failed"
+    download_url: Optional[str] = None
+    document_error: Optional[str] = None
+    delivery_email: Optional[str] = None
+
 
 # ---- GraphRegistry ----
 
@@ -75,41 +112,84 @@ class GraphInstance:
     graph: Any
     config: dict
     stage: int
-    checkpointer: MemorySaver
+    checkpointer: Any
 
 
 class GraphRegistry:
-    def __init__(self):
-        self._instances: Dict[str, GraphInstance] = {}
+    """Builds one compiled graph per stage over a single shared checkpointer.
+
+    A GraphInstance is a lightweight (graph, config, stage) view — the actual
+    conversation state lives in the checkpointer, keyed by thread_id (the
+    session_id). Because the checkpointer is shared and the graphs are stateless
+    to build, an instance for any session can be produced on demand — even in a
+    process that never created it — which is what makes the API stateless and
+    survive restarts (with a durable checkpointer).
+    """
+
+    def __init__(self, checkpointer=None):
+        self._checkpointer = checkpointer or MemorySaver()
+        self._graphs = {
+            1: build_stage1_graph(checkpointer=self._checkpointer),
+            2: build_stage2_graph(checkpointer=self._checkpointer),
+        }
         self._locks: Dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def instance_for(self, session_id: str, stage: int) -> GraphInstance:
+        return GraphInstance(
+            graph=self._graphs[stage],
+            config={"configurable": {"thread_id": session_id}},
+            stage=stage,
+            checkpointer=self._checkpointer,
+        )
 
     def create_stage1(self, session_id: str) -> GraphInstance:
-        checkpointer = MemorySaver()
-        graph = build_stage1_graph(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": session_id}}
-        instance = GraphInstance(graph=graph, config=config, stage=1, checkpointer=checkpointer)
-        self._instances[session_id] = instance
-        return instance
+        return self.instance_for(session_id, 1)
 
     def create_stage2(self, session_id: str) -> GraphInstance:
-        checkpointer = MemorySaver()
-        graph = build_stage2_graph(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": session_id}}
-        instance = GraphInstance(graph=graph, config=config, stage=2, checkpointer=checkpointer)
-        self._instances[session_id] = instance
-        return instance
-
-    def get(self, session_id: str) -> Optional[GraphInstance]:
-        return self._instances.get(session_id)
+        return self.instance_for(session_id, 2)
 
     def get_lock(self, session_id: str) -> threading.Lock:
-        if session_id not in self._locks:
-            self._locks[session_id] = threading.Lock()
-        return self._locks[session_id]
+        with self._locks_guard:
+            if session_id not in self._locks:
+                self._locks[session_id] = threading.Lock()
+            return self._locks[session_id]
 
-    def remove(self, session_id: str) -> None:
-        self._instances.pop(session_id, None)
-        self._locks.pop(session_id, None)
+    def delete_session_state(self, session_id: str) -> None:
+        """Erase a session's conversation checkpoints (right to erasure)."""
+        with self._locks_guard:
+            self._locks.pop(session_id, None)
+        deleter = getattr(self._checkpointer, "delete_thread", None)
+        if not callable(deleter):
+            # The pinned checkpointer is expected to support this; if a future
+            # bump removes it, erasure would silently leave transcripts behind.
+            logger.error(
+                "checkpointer %s has no delete_thread — transcripts NOT erased for session=%s",
+                type(self._checkpointer).__name__, session_id,
+            )
+            return
+        try:
+            deleter(session_id)
+        except Exception as e:
+            logger.error("session=%s checkpoint deletion failed: %s", session_id, e)
+
+
+def _rehydrate_instance(session_id: str, session: Optional[dict] = None) -> Optional[GraphInstance]:
+    """Build a graph instance for an existing session, loading state from the
+    (shared, possibly durable) checkpointer. Returns None if the session is
+    unknown or has no persisted conversation state yet."""
+    store = get_session_store()
+    session = session or store.get_session(session_id)
+    if not session:
+        return None
+    stage = session.get("stage")
+    if stage not in (1, 2):
+        return None
+    instance = _registry.instance_for(session_id, stage)
+    # A session with no checkpoint (empty state) can't be resumed.
+    if not instance.graph.get_state(instance.config).values:
+        return None
+    return instance
 
 
 # ---- Graph Invocation Helpers ----
@@ -158,10 +238,39 @@ _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="static-assets")
 
-# Module-level singletons
-_registry = GraphRegistry()
-_document_store: Dict[str, str] = {}  # document_id -> file_path
-_generation_jobs: Dict[str, Dict[str, Any]] = {}  # document_id -> {status, download_url, error}
+# Module-level singletons. The registry's checkpointer is durable when
+# STORAGE_BACKEND=persistent, so sessions survive a restart.
+_registry = GraphRegistry(checkpointer=create_checkpointer())
+# Generated documents: bytes in the blob store, metadata/status in the registry.
+# Both are durable/shared under the persistent backend so downloads survive a
+# restart and work across workers.
+_blob_store = create_blob_store()
+_doc_registry = create_document_registry()
+_email_sender = create_email_sender()
+
+_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+# A generation job still "generating" past this is treated as failed — the
+# worker (or its whole container) died mid-run, so the manager isn't left
+# polling forever. Generous vs the ~10 min worst case (600s client timeout +
+# retries + export).
+_GENERATION_STALE_SECONDS = 1200
+
+
+def _effective_status(meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return meta with a stale 'generating' job downgraded to 'failed'."""
+    if not meta or meta.get("status") != "generating":
+        return meta
+    started = meta.get("started_at")
+    if started and (time.time() - started) > _GENERATION_STALE_SECONDS:
+        stale = dict(meta)
+        stale["status"] = "failed"
+        stale["error"] = "Generation timed out — please try generating again."
+        return stale
+    return meta
 
 
 # ---- Background Generation Worker ----
@@ -173,64 +282,64 @@ def _run_generation_in_background(
     profile: Any,
     output_format: str,
 ):
-    """Run document generation in a background thread."""
+    """Run document generation in a background thread, then store the bytes in
+    the blob store and record completion in the document registry."""
     try:
         gen_result = generate_document(gen_request)
-
-        # Parse and export
         interim_doc = parse_llm_output(gen_result.raw_markdown, profile, session_id)
 
-        output_dir = tempfile.mkdtemp(prefix="kk_")
+        tmp_dir = tempfile.mkdtemp(prefix="kk_")
+        try:
+            ext = "docx"
+            if output_format == "pdf":
+                try:
+                    from output.exporters.pdf_exporter import generate_pdf
+                    path = generate_pdf(interim_doc, os.path.join(tmp_dir, f"{document_id}.pdf"))
+                    ext = "pdf"
+                except (ImportError, RuntimeError) as e:
+                    logger.warning("PDF export unavailable (%s), falling back to DOCX", e)
+                    path = generate_docx(interim_doc, os.path.join(tmp_dir, f"{document_id}.docx"))
+            else:
+                path = generate_docx(interim_doc, os.path.join(tmp_dir, f"{document_id}.docx"))
+            with open(path, "rb") as fh:
+                data = fh.read()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        if output_format == "pdf":
-            try:
-                from output.exporters.pdf_exporter import generate_pdf
-                file_path = os.path.join(output_dir, f"{document_id}.pdf")
-                file_path = generate_pdf(interim_doc, file_path)
-            except (ImportError, RuntimeError) as e:
-                logger.warning("PDF export unavailable (%s), falling back to DOCX", e)
-                file_path = os.path.join(output_dir, f"{document_id}.docx")
-                file_path = generate_docx(interim_doc, file_path)
-        else:
-            file_path = os.path.join(output_dir, f"{document_id}.docx")
-            file_path = generate_docx(interim_doc, file_path)
+        key = f"{document_id}.{ext}"
+        _blob_store.put(key, data)
+        _doc_registry.mark_complete(
+            document_id,
+            key=key,
+            content_type=_CONTENT_TYPES[ext],
+            filename=f"KnowledgeKeeper-Handover.{ext}",
+        )
 
-        _document_store[document_id] = file_path
-        _generation_jobs[document_id] = {
-            "status": "complete",
-            "download_url": f"/api/documents/{document_id}",
-            "error": None,
-        }
+        on_document_generated(session_id, document_id, key)
+        logger.info("session=%s document=%s format=%s generation=complete", session_id, document_id, ext)
 
-        on_document_generated(session_id, document_id, file_path)
-        logger.info("session=%s document=%s format=%s generation=complete", session_id, document_id, output_format)
+        # Best-effort delivery — never fails the generation.
+        deliver_handover(
+            store=get_session_store(),
+            sender=_email_sender,
+            stage2_session_id=session_id,
+            document_id=document_id,
+            gen_request=gen_request,
+        )
 
     except Exception as e:
         logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
-        _generation_jobs[document_id] = {
-            "status": "failed",
-            "download_url": None,
-            "error": str(e),
-        }
+        _doc_registry.mark_failed(document_id, str(e))
 
 
 # ---- Endpoints ----
 
 @app.get("/api/health")
 def health_check():
-    import os
-    key = settings.anthropic_api_key
-    raw_key = os.environ.get("ANTHROPIC_API_KEY", "(not in os.environ)")
+    # Deliberately minimal — no key previews, env var names, or config values.
     return {
         "status": "ok",
-        "api_key_set": bool(key),
-        "api_key_preview": f"{key[:12]}..." if key else "(empty)",
-        "raw_env_key_preview": f"{raw_key[:12]}..." if raw_key and raw_key != "(not in os.environ)" else raw_key,
-        "environment": settings.environment,
-        "raw_env_environment": os.environ.get("ENVIRONMENT", "(not in os.environ)"),
-        "allowed_origins": settings.allowed_origins,
-        "raw_env_origins": os.environ.get("ALLOWED_ORIGINS", "(not in os.environ)"),
-        "all_env_keys_with_ant": [k for k in os.environ.keys() if "ANT" in k.upper() or "API" in k.upper()],
+        "api_key_set": bool(settings.anthropic_api_key),
     }
 
 
@@ -267,24 +376,54 @@ def create_stage1():
 def create_stage2(request: CreateStage2Request):
     store = get_session_store()
 
+    # GDPR: no interview without explicit consent.
+    if not request.consent_acknowledged:
+        raise HTTPException(status_code=400, detail="Consent is required to begin the interview")
+
+    # Resolve the invite token — the employee never sees the Stage 1 session ID.
+    stage1_session_id = store.resolve_invite_token(request.invite_token)
+    if not stage1_session_id:
+        # An already-used token isn't a dead end: if its interview is still in
+        # progress (e.g. the employee cleared storage or switched device),
+        # resume that same session instead of locking them out.
+        if store.is_invite_token_used(request.invite_token):
+            existing = store.get_invite_session(request.invite_token)
+            existing_session = store.get_session(existing) if existing else None
+            if existing_session and not existing_session.get("session_complete"):
+                instance = _rehydrate_instance(existing, existing_session)
+                message = ""
+                if instance:
+                    message = instance.graph.get_state(instance.config).values.get("last_agent_message", "")
+                logger.info("session=%s stage=2 action=resumed", existing)
+                return SessionCreatedResponse(
+                    session_id=existing,
+                    message=message or "Welcome back — send a message to pick up where you left off.",
+                )
+            raise HTTPException(status_code=410, detail="This interview has already been completed.")
+        raise HTTPException(status_code=404, detail="Invalid or expired interview link")
+
     # Validate Stage 1 session exists
-    stage1_session = store.get_session(request.stage1_session_id)
+    stage1_session = store.get_session(stage1_session_id)
     if not stage1_session:
         raise HTTPException(status_code=404, detail="Stage 1 session not found")
 
     # Validate profile exists
-    profile = store.get_profile(request.stage1_session_id)
+    profile = store.get_profile(stage1_session_id)
     if not profile:
         raise HTTPException(status_code=400, detail="Stage 1 profile not yet generated")
 
-    session_id = store.create_session(stage=2, metadata={"stage1_session_id": request.stage1_session_id})
-    store.link_sessions(request.stage1_session_id, session_id)
+    session_id = store.create_session(
+        stage=2,
+        metadata={"stage1_session_id": stage1_session_id, "consent_given_at": time.time()},
+    )
+    store.link_sessions(stage1_session_id, session_id)
+    store.consume_invite_token(request.invite_token, stage2_session_id=session_id)
 
     instance = _registry.create_stage2(session_id)
 
     initial_state = {
         "session_id": session_id,
-        "stage1_session_id": request.stage1_session_id,
+        "stage1_session_id": stage1_session_id,
         "profile": None,
         "current_phase": "role_orientation",
         "current_block": "role_orientation",
@@ -297,6 +436,10 @@ def create_stage2(request: CreateStage2Request):
         "answers": {},
         "conversation_history": [],
         "risk_flags": [],
+        "entities": {},
+        "sweep_questions": [],
+        "question_count": 0,
+        "question_budget": 0,
         "last_agent_message": "",
         "session_complete": False,
     }
@@ -304,7 +447,7 @@ def create_stage2(request: CreateStage2Request):
     state = _run_graph_initial(instance, initial_state)
     greeting = state.get("last_agent_message", "")
 
-    logger.info("session=%s stage=2 action=created linked_to=%s", session_id, request.stage1_session_id)
+    logger.info("session=%s stage=2 action=created linked_to=%s", session_id, stage1_session_id)
     return SessionCreatedResponse(session_id=session_id, message=greeting)
 
 
@@ -316,7 +459,7 @@ def send_message(session_id: str, request: SendMessageRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    instance = _registry.get(session_id)
+    instance = _rehydrate_instance(session_id, session)
     if not instance:
         raise HTTPException(status_code=404, detail="No active graph for session")
 
@@ -349,11 +492,24 @@ def send_message(session_id: str, request: SendMessageRequest):
                 store.store_profile(session_id, profile_validated)
                 response.profile = profile if isinstance(profile, dict) else profile_validated.model_dump()
         store.update_session(session_id, {"session_complete": True})
+        # Mint the employee invite token (goes in the share link) and the
+        # manager token (gates document access). Returned once, to the
+        # manager's own browser.
+        response.invite_token = store.create_invite_token(session_id)
+        response.manager_token = store.create_manager_token(session_id)
         on_stage1_complete(session_id)
 
     elif session_complete and instance.stage == 2:
         store.update_session(session_id, {"session_complete": True})
         on_stage2_complete(session_id)
+        # Auto-trigger document generation — the handover is delivered to the
+        # manager, not generated on demand by the employee.
+        try:
+            _start_generation_for_stage2(session_id, settings.default_output_format)
+        except Exception as e:
+            # Never break the employee's completion response over this — the
+            # manager can retry generation from their overview page.
+            logger.error("session=%s auto-generation failed to start: %s", session_id, e)
 
     return response
 
@@ -366,13 +522,14 @@ def get_session_status(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    instance = _registry.get(session_id)
+    instance = _rehydrate_instance(session_id, session)
 
+    # Note: deliberately does NOT expose the linked session ID — a Stage 2
+    # caller must never learn the manager's Stage 1 session ID.
     response = SessionStatusResponse(
         session_id=session_id,
         stage=session.get("stage", 0),
         session_complete=session.get("session_complete", False),
-        linked_session_id=store.get_linked_session(session_id),
     )
 
     if instance:
@@ -381,27 +538,65 @@ def get_session_status(session_id: str):
         response.current_block = state.get("current_block")
         response.current_question_index = state.get("current_question_index")
         response.session_complete = state.get("session_complete", False)
-
         if instance.stage == 2:
-            risk_flags = state.get("risk_flags", [])
-            response.risk_flag_count = len(risk_flags)
+            from agents.stage2_employee_interview.nodes import compute_progress
+
+            response.progress = compute_progress(state)
 
     return response
 
 
-@app.post("/api/sessions/{session_id}/generate", response_model=GenerateDocumentResponse)
-def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest):
-    """Start document generation in the background. Returns a document_id for polling."""
+@app.get("/api/sessions/{session_id}/history", response_model=SessionHistoryResponse)
+def get_session_history(session_id: str):
+    """Return the conversation so far so the UI can restore after a refresh or a
+    later sitting. Scoped to the caller's own session (same access model as
+    /message) — a Stage 2 caller only ever sees their own transcript, never the
+    manager's Stage 1 session."""
     store = get_session_store()
 
     session = store.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.get("stage") != 2:
-        raise HTTPException(status_code=400, detail="Document generation requires a Stage 2 session")
+    instance = _rehydrate_instance(session_id, session)
 
-    instance = _registry.get(session_id)
+    messages: List[HistoryMessage] = []
+    current_block = None
+    session_complete = session.get("session_complete", False)
+
+    if instance:
+        state = instance.graph.get_state(instance.config).values
+        session_complete = state.get("session_complete", session_complete)
+        current_block = state.get("current_block")
+        for msg in state.get("conversation_history", []):
+            if isinstance(msg, AIMessage):
+                messages.append(HistoryMessage(role="agent", content=msg.content))
+            elif isinstance(msg, HumanMessage):
+                messages.append(HistoryMessage(role="user", content=msg.content))
+
+    return SessionHistoryResponse(
+        session_id=session_id,
+        stage=session.get("stage", 0),
+        session_complete=session_complete,
+        current_block=current_block,
+        messages=messages,
+    )
+
+
+# ---- Document Generation (manager-facing) ----
+#
+# The handover document — including the Risk Summary about the departing
+# employee and any confidential sections — is for the manager/recipients.
+# It is never generated or downloaded from the employee's session.
+
+def _start_generation_for_stage2(session_id: str, output_format: str) -> str:
+    """Kick off background document generation for a completed Stage 2 session.
+
+    Returns the document_id. Raises HTTPException on invalid preconditions.
+    """
+    store = get_session_store()
+
+    instance = _rehydrate_instance(session_id)
     if not instance:
         raise HTTPException(status_code=404, detail="No active graph for session")
 
@@ -410,7 +605,6 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
     if not state.get("session_complete"):
         raise HTTPException(status_code=400, detail="Stage 2 session is not yet complete")
 
-    # Get the linked Stage 1 profile
     stage1_id = state.get("stage1_session_id") or store.get_linked_session(session_id)
     if not stage1_id:
         raise HTTPException(status_code=400, detail="No linked Stage 1 session found")
@@ -419,7 +613,6 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
     if not profile:
         raise HTTPException(status_code=400, detail="Stage 1 profile not found")
 
-    # Build generation request from Stage 2 state
     gen_request = GenerationRequest(
         session_id=session_id,
         profile=profile,
@@ -431,16 +624,9 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
     )
 
     document_id = str(uuid.uuid4())
-    output_format = request.format or settings.default_output_format
+    _doc_registry.create(document_id, owner_id=stage1_id, fmt=output_format)
+    store.update_session(stage1_id, {"latest_document_id": document_id})
 
-    # Track the job
-    _generation_jobs[document_id] = {
-        "status": "generating",
-        "download_url": None,
-        "error": None,
-    }
-
-    # Run in background thread
     thread = threading.Thread(
         target=_run_generation_in_background,
         args=(document_id, session_id, gen_request, profile, output_format),
@@ -449,6 +635,69 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
     thread.start()
 
     logger.info("session=%s document=%s format=%s generation=started", session_id, document_id, output_format)
+    return document_id
+
+
+def _require_manager_token(stage1_session_id: str, token: str) -> None:
+    store = get_session_store()
+    if not store.get_session(stage1_session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not store.validate_manager_token(stage1_session_id, token):
+        raise HTTPException(status_code=403, detail="Invalid manager token")
+
+
+@app.get("/api/manager/{stage1_session_id}/handover", response_model=ManagerOverviewResponse)
+def manager_handover_overview(stage1_session_id: str, token: str):
+    """Manager view: employee interview progress and document status."""
+    _require_manager_token(stage1_session_id, token)
+    store = get_session_store()
+
+    stage2_id = store.get_linked_session(stage1_session_id)
+    stage2_status = "not_started"
+    risk_flag_count = None
+
+    if stage2_id:
+        stage2_status = "in_progress"
+        stage2_session = store.get_session(stage2_id)
+        instance = _rehydrate_instance(stage2_id, stage2_session)
+        if instance:
+            state = instance.graph.get_state(instance.config).values
+            if state.get("session_complete"):
+                stage2_status = "complete"
+            risk_flag_count = len(state.get("risk_flags", []))
+        elif stage2_session and stage2_session.get("session_complete"):
+            stage2_status = "complete"
+
+    stage1_session = store.get_session(stage1_session_id) or {}
+    document_id = stage1_session.get("latest_document_id")
+    meta = _effective_status(_doc_registry.get(document_id) if document_id else None)
+    complete = bool(meta and meta["status"] == "complete")
+
+    return ManagerOverviewResponse(
+        stage1_session_id=stage1_session_id,
+        stage2_status=stage2_status,
+        risk_flag_count=risk_flag_count,
+        document_id=document_id,
+        document_status=meta["status"] if meta else None,
+        download_url=f"/api/documents/{document_id}" if complete else None,
+        document_error=meta.get("error") if meta else None,
+        delivery_email=stage1_session.get("manager_email"),
+    )
+
+
+@app.post("/api/manager/{stage1_session_id}/generate", response_model=GenerateDocumentResponse)
+def manager_generate_document(stage1_session_id: str, request: GenerateDocumentRequest, token: str):
+    """Manager-triggered (re)generation, e.g. in a different format."""
+    _require_manager_token(stage1_session_id, token)
+    store = get_session_store()
+
+    stage2_id = store.get_linked_session(stage1_session_id)
+    if not stage2_id:
+        raise HTTPException(status_code=400, detail="Employee interview has not started yet")
+
+    output_format = request.format or settings.default_output_format
+    document_id = _start_generation_for_stage2(stage2_id, output_format)
+
     return GenerateDocumentResponse(
         document_id=document_id,
         download_url=f"/api/documents/{document_id}",
@@ -456,32 +705,128 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
     )
 
 
-@app.get("/api/documents/{document_id}/status", response_model=GenerationStatusResponse)
-def get_generation_status(document_id: str):
-    """Poll for document generation status."""
-    job = _generation_jobs.get(document_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Document generation job not found")
+@app.post("/api/manager/{stage1_session_id}/delivery-email")
+def set_delivery_email(stage1_session_id: str, request: SetDeliveryEmailRequest, token: str):
+    """Set the manager's delivery email. If a completed handover already exists,
+    email it now; otherwise it will be emailed automatically on completion."""
+    _require_manager_token(stage1_session_id, token)
 
+    email = request.email.strip()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+
+    store = get_session_store()
+    store.update_session(stage1_session_id, {"manager_email": email})
+
+    # Deliver immediately if a completed document is already waiting.
+    emailed = False
+    stage1_session = store.get_session(stage1_session_id) or {}
+    document_id = stage1_session.get("latest_document_id")
+    stage2_id = store.get_linked_session(stage1_session_id)
+    meta = _doc_registry.get(document_id) if document_id else None
+
+    if meta and meta["status"] == "complete" and stage2_id:
+        instance = _rehydrate_instance(stage2_id)
+        if instance:
+            state = instance.graph.get_state(instance.config).values
+            gen_ctx = GenerationRequest(
+                session_id=stage2_id,
+                profile=store.get_profile(stage1_session_id),
+                conversation_history=state.get("conversation_history", []),
+                risk_flags=state.get("risk_flags", []),
+                answers=state.get("answers", {}),
+                block_order=state.get("block_order", []),
+                block_depths=state.get("block_depths", {}),
+            )
+            emailed = deliver_handover(
+                store=store,
+                sender=_email_sender,
+                stage2_session_id=stage2_id,
+                document_id=document_id,
+                gen_request=gen_ctx,
+            )
+
+    return {"ok": True, "emailed": emailed}
+
+
+@app.delete("/api/manager/{stage1_session_id}")
+def delete_engagement(stage1_session_id: str, token: str):
+    """Right to erasure: permanently delete everything for this engagement —
+    both sessions, the profile, the linked documents, conversation checkpoints,
+    and the tokens. Manager-token gated."""
+    _require_manager_token(stage1_session_id, token)
+    store = get_session_store()
+
+    stage1_session = store.get_session(stage1_session_id) or {}
+    stage2_id = store.get_linked_session(stage1_session_id)
+
+    # Documents (blob bytes + metadata)
+    document_id = stage1_session.get("latest_document_id")
+    if document_id:
+        meta = _doc_registry.get(document_id)
+        if meta and meta.get("key"):
+            try:
+                _blob_store.delete(meta["key"])
+            except Exception as e:
+                logger.warning("document=%s blob deletion failed: %s", document_id, e)
+        _doc_registry.delete(document_id)
+
+    # Conversation checkpoints for both threads
+    _registry.delete_session_state(stage1_session_id)
+    if stage2_id:
+        _registry.delete_session_state(stage2_id)
+
+    # Session store: profile, links, tokens, sessions
+    store.delete_profile(stage1_session_id)
+    store.delete_invite_tokens_for(stage1_session_id)
+    store.delete_manager_token(stage1_session_id)
+    store.delete_link(stage1_session_id)
+    if stage2_id:
+        store.delete_session(stage2_id)
+    store.delete_session(stage1_session_id)
+
+    logger.info("engagement stage1=%s stage2=%s action=deleted", stage1_session_id, stage2_id)
+    return {"ok": True, "deleted": True}
+
+
+@app.get("/api/documents/{document_id}/status", response_model=GenerationStatusResponse)
+def get_generation_status(document_id: str, token: str):
+    """Poll for document generation status (manager token required)."""
+    meta = _doc_registry.get(document_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Document generation job not found")
+    _require_manager_token(meta["owner_id"], token)
+
+    meta = _effective_status(meta)
+    complete = meta["status"] == "complete"
     return GenerationStatusResponse(
         document_id=document_id,
-        status=job["status"],
-        download_url=job.get("download_url"),
-        error=job.get("error"),
+        status=meta["status"],
+        download_url=f"/api/documents/{document_id}" if complete else None,
+        error=meta.get("error"),
     )
 
 
 @app.get("/api/documents/{document_id}")
-def download_document(document_id: str):
-    file_path = _document_store.get(document_id)
-    if not file_path or not os.path.exists(file_path):
+def download_document(document_id: str, token: str):
+    """Download a generated handover document (manager token required)."""
+    meta = _doc_registry.get(document_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Document not found")
+    _require_manager_token(meta["owner_id"], token)
+
+    if meta["status"] != "complete" or not meta.get("key"):
+        raise HTTPException(status_code=404, detail="Document not ready")
+
+    data = _blob_store.read(meta["key"])
+    if data is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    filename = os.path.basename(file_path)
-    media_type = "application/pdf" if file_path.endswith(".pdf") else (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return Response(
+        content=data,
+        media_type=meta["content_type"],
+        headers={"Content-Disposition": f'attachment; filename="{meta["filename"]}"'},
     )
-    return FileResponse(path=file_path, filename=filename, media_type=media_type)
 
 
 # ---- SPA Fallback (must be last) ----

@@ -22,8 +22,23 @@ from config.constants import (
     STAGE2_CLOSING_QUESTION_COUNT,
     STAGE2_ROLE_ORIENTATION_QUESTION_COUNT,
 )
+from models.classifier_outputs import (
+    AnswerAnalysis,
+    DetectedEntity,
+    DetectedRiskFlag,
+    FollowupDecision,
+)
 from models.knowledge_blocks import determine_block_order_and_depth
 from models.role_intelligence_profile import RoleIntelligenceProfile
+
+
+def _make_structured_classifier(result):
+    """Mock classifier LLM whose with_structured_output(...).invoke returns `result`."""
+    mock_llm = MagicMock()
+    structured = MagicMock()
+    structured.invoke.return_value = result
+    mock_llm.with_structured_output.return_value = structured
+    return mock_llm
 
 
 # ---- Helpers ----
@@ -245,13 +260,14 @@ class TestRiskFlagClassifierNode:
     def test_detects_flag(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='[{"flag_type": "single_point_of_failure", "severity": "critical", '
-                    '"description": "Only person who knows SAP workflow", '
-                    '"recommended_action": "Document before departure"}]'
-        )
-        mock_get_llm.return_value = mock_llm
+        mock_get_llm.return_value = _make_structured_classifier(AnswerAnalysis(flags=[
+            DetectedRiskFlag(
+                flag_type="single_point_of_failure",
+                severity="critical",
+                description="Only person who knows SAP workflow",
+                recommended_action="Document before departure",
+            ),
+        ]))
 
         state = _make_state(
             current_block="internal_processes_workflows",
@@ -270,9 +286,7 @@ class TestRiskFlagClassifierNode:
     def test_no_flags_returns_empty(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="[]")
-        mock_get_llm.return_value = mock_llm
+        mock_get_llm.return_value = _make_structured_classifier(AnswerAnalysis(flags=[]))
 
         state = _make_state(
             current_block="role_orientation",
@@ -290,7 +304,7 @@ class TestRiskFlagClassifierNode:
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
         mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("API error")
+        mock_llm.with_structured_output.return_value.invoke.side_effect = Exception("API error")
         mock_get_llm.return_value = mock_llm
 
         state = _make_state(
@@ -309,16 +323,20 @@ class TestRiskFlagClassifierNode:
     def test_multiple_flags(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='['
-                    '{"flag_type": "single_point_of_failure", "severity": "critical", '
-                    '"description": "Only admin for SAP", "recommended_action": "Transfer admin access"},'
-                    '{"flag_type": "access_credential_gap", "severity": "high", '
-                    '"description": "Holds sole Power BI credentials", "recommended_action": "Share credentials"}'
-                    ']'
-        )
-        mock_get_llm.return_value = mock_llm
+        mock_get_llm.return_value = _make_structured_classifier(AnswerAnalysis(flags=[
+            DetectedRiskFlag(
+                flag_type="single_point_of_failure",
+                severity="critical",
+                description="Only admin for SAP",
+                recommended_action="Transfer admin access",
+            ),
+            DetectedRiskFlag(
+                flag_type="access_credential_gap",
+                severity="high",
+                description="Holds sole Power BI credentials",
+                recommended_action="Share credentials",
+            ),
+        ]))
 
         state = _make_state(
             current_block="technical_systems_tools",
@@ -427,11 +445,9 @@ class TestFollowupClassifierNode:
     def test_followup_needed(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import followup_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='{"needs_followup": true, "reason": "vague", "suggested_followup": "Can you be more specific?"}'
+        mock_get_llm.return_value = _make_structured_classifier(
+            FollowupDecision(needs_followup=True, reason="vague", suggested_followup="Can you be more specific?")
         )
-        mock_get_llm.return_value = mock_llm
 
         state = _make_state(
             conversation_history=[
@@ -446,11 +462,9 @@ class TestFollowupClassifierNode:
     def test_no_followup(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import followup_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='{"needs_followup": false, "reason": "clear answer", "suggested_followup": ""}'
+        mock_get_llm.return_value = _make_structured_classifier(
+            FollowupDecision(needs_followup=False, reason="clear answer", suggested_followup="")
         )
-        mock_get_llm.return_value = mock_llm
 
         state = _make_state(
             conversation_history=[
@@ -466,7 +480,7 @@ class TestFollowupClassifierNode:
         from agents.stage2_employee_interview.nodes import followup_classifier_node
 
         mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("API error")
+        mock_llm.with_structured_output.return_value.invoke.side_effect = Exception("API error")
         mock_get_llm.return_value = mock_llm
 
         state = _make_state(
@@ -556,7 +570,7 @@ class TestGreetingNode:
 # ---- TestProcessAnswerNode ----
 
 class TestProcessAnswerNode:
-    def test_stores_answer(self):
+    def test_stores_answer_as_list(self):
         state = _make_state(
             current_block="internal_processes_workflows",
             current_question_index=1,
@@ -566,9 +580,28 @@ class TestProcessAnswerNode:
             ],
         )
         result = process_answer_node(state)
-        assert result["answers"]["internal_processes_workflows.1"] == "An email from the production manager."
+        assert result["answers"]["internal_processes_workflows.1"] == ["An email from the production manager."]
 
-    def test_resets_followup_count(self):
+    def test_followup_answer_appends_not_overwrites(self):
+        """Follow-up answers land on the same key — they must accumulate."""
+        state = _make_state(
+            current_block="internal_processes_workflows",
+            current_question_index=1,
+            answers={"internal_processes_workflows.1": ["An email from the production manager."]},
+            conversation_history=[
+                AIMessage(content="What happens if that email never arrives?"),
+                HumanMessage(content="I chase the manager directly — there's no formal fallback."),
+            ],
+        )
+        result = process_answer_node(state)
+        assert result["answers"]["internal_processes_workflows.1"] == [
+            "An email from the production manager.",
+            "I chase the manager directly — there's no formal fallback.",
+        ]
+
+    def test_does_not_reset_followup_count(self):
+        """Resetting here would defeat the MAX_FOLLOWUPS limit — this node also
+        processes follow-up answers."""
         state = _make_state(
             current_block="role_orientation",
             current_question_index=0,
@@ -576,4 +609,247 @@ class TestProcessAnswerNode:
             conversation_history=[HumanMessage(content="I coordinate production.")],
         )
         result = process_answer_node(state)
-        assert result["followup_count"] == 0
+        assert "followup_count" not in result
+
+
+# ---- Phase 2: entity memory ----
+
+class TestEntityMemory:
+    def _entity(self, name="Traxis", probed=False, importance="high"):
+        return {
+            "name": name, "entity_type": "system", "importance": importance,
+            "context": "runs the schedule", "source_block": "technical_systems_tools",
+            "mention_count": 1, "probed": probed,
+        }
+
+    def test_merge_new_and_repeat_mentions(self):
+        from models.entity_memory import merge_entities
+
+        detected = [DetectedEntity(name="Traxis", entity_type="system", importance="medium")]
+        merged = merge_entities({}, detected, "technical_systems_tools")
+        assert merged["traxis"]["mention_count"] == 1
+
+        again = [DetectedEntity(name="traxis", entity_type="system", importance="high", context="sole admin")]
+        merged = merge_entities(merged, again, "undocumented_workarounds")
+        assert merged["traxis"]["mention_count"] == 2
+        assert merged["traxis"]["importance"] == "high"  # upgraded
+        assert merged["traxis"]["context"] == "sole admin"
+
+    def test_mark_probed_by_agent_question(self):
+        from models.entity_memory import mark_probed
+
+        entities = {"traxis": self._entity()}
+        updated = mark_probed(entities, "Can you tell me more about Traxis and who administers it?")
+        assert updated["traxis"]["probed"] is True
+
+    def test_unprobed_sorted_by_importance(self):
+        from models.entity_memory import unprobed_entities
+
+        entities = {
+            "a": self._entity(name="A", importance="low"),
+            "b": self._entity(name="B", importance="high"),
+            "c": self._entity(name="C", probed=True, importance="high"),
+        }
+        names = [e.name for e in unprobed_entities(entities)]
+        assert names == ["B", "A"]  # probed C excluded, high first
+
+    @patch("agents.stage2_employee_interview.nodes._get_classifier_llm")
+    def test_classifier_merges_entities_into_state(self, mock_get_llm):
+        from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
+
+        mock_get_llm.return_value = _make_structured_classifier(AnswerAnalysis(
+            flags=[],
+            entities=[DetectedEntity(name="Priya", entity_type="person", importance="high", context="unblocks Northgate")],
+        ))
+        state = _make_state(
+            current_block="client_stakeholder_relationships",
+            conversation_history=[
+                AIMessage(content="Who do you work with most?"),
+                HumanMessage(content="Half my job is knowing when to ping Priya."),
+            ],
+            entities={},
+        )
+        result = risk_flag_classifier_node(state)
+        assert result["entities"]["priya"]["name"] == "Priya"
+        assert result["entities"]["priya"]["probed"] is False
+
+    def test_advance_transitions_to_entity_sweep(self):
+        """After the last block, unprobed high-importance entities get a sweep."""
+        state = _make_state(
+            current_phase="knowledge_blocks",
+            current_block="decision_making_logic",
+            current_question_index=LIGHT_TOUCH_MAX_QUESTIONS - 1,
+            current_block_index=4,  # last block
+            entities={"traxis": self._entity()},
+            question_count=10,
+            question_budget=45,
+        )
+        result = advance_question_node(state)
+        assert result["current_phase"] == "entity_sweep"
+        assert len(result["sweep_questions"]) == 1
+        assert "Traxis" in result["sweep_questions"][0]
+
+    def test_no_sweep_when_all_probed(self):
+        state = _make_state(
+            current_phase="knowledge_blocks",
+            current_block="decision_making_logic",
+            current_question_index=LIGHT_TOUCH_MAX_QUESTIONS - 1,
+            current_block_index=4,
+            entities={"traxis": self._entity(probed=True)},
+        )
+        result = advance_question_node(state)
+        assert result["current_phase"] == "closing_sequence"
+
+    def test_sweep_advances_to_closing(self):
+        state = _make_state(
+            current_phase="entity_sweep",
+            current_block="entity_sweep",
+            current_question_index=0,
+            sweep_questions=["Ask about Traxis"],
+        )
+        result = advance_question_node(state)
+        assert result["current_phase"] == "closing_sequence"
+
+
+# ---- Phase 2: information-gain follow-ups ----
+
+class TestInformationGainFollowups:
+    def _state_with_qa(self, **overrides):
+        return _make_state(
+            conversation_history=[
+                AIMessage(content="What processes do you own?"),
+                HumanMessage(content="A few bits and pieces, it mostly just works."),
+            ],
+            **overrides,
+        )
+
+    def _run(self, decision, **state_overrides):
+        from agents.stage2_employee_interview.nodes import followup_classifier_node
+
+        with patch("agents.stage2_employee_interview.nodes._get_classifier_llm") as mock_get:
+            mock_get.return_value = _make_structured_classifier(decision)
+            return followup_classifier_node(self._state_with_qa(**state_overrides))
+
+    def test_low_gain_suppressed(self):
+        result = self._run(FollowupDecision(
+            needs_followup=True, information_gain="low", reason="rephrasing",
+            suggested_followup="Anything else?",
+        ))
+        assert result["pending_followup"] is None
+
+    def test_refusal_suppressed(self):
+        result = self._run(FollowupDecision(
+            needs_followup=True, is_refusal=True, information_gain="high",
+            reason="declined", suggested_followup="Are you sure?",
+        ))
+        assert result["pending_followup"] is None
+
+    def test_medium_gain_allowed_under_budget(self):
+        result = self._run(
+            FollowupDecision(
+                needs_followup=True, information_gain="medium", reason="incomplete",
+                suggested_followup="What triggers that?",
+            ),
+            question_count=5, question_budget=40,
+        )
+        assert result["pending_followup"] == "What triggers that?"
+
+    def test_medium_gain_suppressed_over_budget(self):
+        result = self._run(
+            FollowupDecision(
+                needs_followup=True, information_gain="medium", reason="incomplete",
+                suggested_followup="What triggers that?",
+            ),
+            question_count=41, question_budget=40,
+        )
+        assert result["pending_followup"] is None
+
+    def test_high_gain_allowed_over_budget(self):
+        result = self._run(
+            FollowupDecision(
+                needs_followup=True, information_gain="high", reason="undocumented process",
+                suggested_followup="Who else can run that?",
+            ),
+            question_count=41, question_budget=40,
+        )
+        assert result["pending_followup"] == "Who else can run that?"
+
+    def test_captured_context_in_prompt(self):
+        from agents.stage2_employee_interview.prompts import build_captured_context
+
+        answers = {"internal_processes_workflows.0": ["I run the monthly close."]}
+        ctx = build_captured_context(answers, "internal_processes_workflows")
+        assert "monthly close" in ctx
+        assert build_captured_context({}, "internal_processes_workflows") == "(nothing captured yet)"
+
+
+# ---- Phase 2: turn budget & progress ----
+
+class TestTurnBudget:
+    def test_budget_computed_from_plan(self):
+        from agents.stage2_employee_interview.nodes import (
+            compute_question_budget,
+            planned_question_total,
+        )
+
+        order = ["internal_processes_workflows", "supplier_vendor_relationships"]
+        depths = {"internal_processes_workflows": "full", "supplier_vendor_relationships": "light"}
+        planned = planned_question_total(order, depths)
+        # 5 orientation + 7 full + 3 light + 4 closing
+        assert planned == 19
+        assert compute_question_budget(order, depths) > planned
+
+    def test_hard_cap_jumps_to_closing(self):
+        state = _make_state(
+            current_phase="knowledge_blocks",
+            current_block="internal_processes_workflows",
+            current_question_index=1,
+            current_block_index=0,
+            question_count=100,
+            question_budget=40,
+        )
+        result = advance_question_node(state)
+        assert result["current_phase"] == "closing_sequence"
+
+    def test_light_block_shrinks_over_budget(self):
+        """Over the soft budget a light block stops after its first question."""
+        state = _make_state(
+            current_phase="knowledge_blocks",
+            current_block="supplier_vendor_relationships",
+            current_question_index=0,
+            current_block_index=3,
+            question_count=45,
+            question_budget=40,
+        )
+        result = advance_question_node(state)
+        assert result["current_block"] == "decision_making_logic"
+
+    def test_light_block_full_length_under_budget(self):
+        state = _make_state(
+            current_phase="knowledge_blocks",
+            current_block="supplier_vendor_relationships",
+            current_question_index=0,
+            current_block_index=3,
+            question_count=10,
+            question_budget=40,
+        )
+        result = advance_question_node(state)
+        assert result["current_question_index"] == 1
+        assert "current_block" not in result
+
+    def test_progress_shape(self):
+        from agents.stage2_employee_interview.nodes import compute_progress
+
+        state = _make_state(
+            current_phase="knowledge_blocks",
+            current_block="technical_systems_tools",
+            current_question_index=2,
+            current_block_index=1,
+            question_count=12,
+            question_budget=45,
+        )
+        progress = compute_progress(state)
+        assert progress["section_number"] == 3  # orientation + first block done
+        assert progress["section_total"] == 7   # orientation + 5 blocks + closing
+        assert 0 < progress["percent"] < 100
+        assert progress["question_budget"] == 45

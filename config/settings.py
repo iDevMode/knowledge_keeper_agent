@@ -14,12 +14,56 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 72
     stage1_to_stage2_link_ttl_hours: int = 168
 
+    # Retention: durable Postgres profiles are purged after this many days
+    # (Redis session/token state expires via the TTLs above). Right-to-erasure
+    # deletion is immediate and independent of this backstop.
+    data_retention_days: int = 90
+
+    # Storage
+    # "memory"     — in-process (dev/tests; lost on restart)
+    # "persistent" — Redis for session state/tokens + Postgres for profiles
+    storage_backend: str = "memory"
+    database_url: str = ""
+    redis_url: str = ""
+
     # Output
     default_output_format: str = "docx"
+
+    # Document synthesis (Stage 3):
+    # "compose" — extract structured knowledge items first, then compose the
+    #             document from them (nothing dropped; default).
+    # "single"  — one-pass generation from the raw transcript (legacy fallback).
+    synthesis_mode: str = "compose"
+    # LLM-judge QA gate: score the generated document against a rubric before
+    # delivery and regenerate once if it falls below the threshold.
+    enable_qa_gate: bool = True
+    qa_gate_min_score: float = 0.7
+
+    # Document storage: "local" (filesystem; fine for a single persistent
+    # container, lost on ephemeral/serverless disks) or "s3" (S3/R2/any
+    # S3-compatible; required for multi-worker or serverless deploys).
+    # S3 credentials come from the standard AWS env vars (AWS_ACCESS_KEY_ID etc.).
+    document_storage: str = "local"
+    document_storage_path: str = "/tmp/kk_documents"
+    s3_bucket: str = ""
+    s3_endpoint_url: str = ""  # set for Cloudflare R2 / MinIO / other S3-compatible
+    s3_region: str = ""
 
     # API
     api_secret_key: str = ""
     allowed_origins: str = "http://localhost:3000"
+    # Absolute base URL for links in emails (e.g. https://app.example.com).
+    # Falls back to the first allowed origin if unset.
+    public_base_url: str = ""
+
+    # Email delivery: "console" (dev — logs the message) or "smtp"
+    email_backend: str = "console"
+    email_from: str = "KnowledgeKeeper <no-reply@knowledgekeeper.app>"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
 
     # Environment
     environment: str = "development"
@@ -53,6 +97,20 @@ class Settings(BaseSettings):
             errors.append("ANTHROPIC_API_KEY is not set")
         if self.allowed_origins == "http://localhost:3000" and self.environment != "development":
             errors.append("ALLOWED_ORIGINS is still set to localhost — set to your production domain")
+        if self.storage_backend == "persistent":
+            if not self.redis_url:
+                errors.append("STORAGE_BACKEND=persistent requires REDIS_URL")
+            if not self.database_url:
+                errors.append("STORAGE_BACKEND=persistent requires DATABASE_URL")
+        elif self.environment == "production":
+            # Warn, don't fail — don't take down an existing deploy that hasn't
+            # provisioned Redis/Postgres yet. Flip to persistent when ready.
+            print(
+                "[WARN] STORAGE_BACKEND=memory in production — sessions and profiles "
+                "are lost on restart. Set STORAGE_BACKEND=persistent once Redis and "
+                "Postgres are provisioned.",
+                file=sys.stderr,
+            )
         if errors:
             for err in errors:
                 print(f"[FATAL] {err}", file=sys.stderr)

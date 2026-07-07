@@ -199,16 +199,17 @@ CLOSING_MESSAGE = (
     "structured handover document. You won't need to do anything else."
 )
 
-RISK_FLAG_CLASSIFIER_PROMPT_TEMPLATE = """\
-You are a risk flag classifier for an employee knowledge extraction interview. \
-Analyse the following answer from a departing employee and identify any risk flags.
+ANSWER_ANALYSIS_PROMPT_TEMPLATE = """\
+You are an answer analyst for an employee knowledge extraction interview. \
+Analyse the following answer from a departing employee and report (1) any risk \
+flags and (2) any named entities mentioned.
 
 Block: {block}
 Question index: {question_index}
 Question asked: {question}
 Answer received: {answer}
 
-Risk flag types to check for:
+## Risk flag types to check for
 - single_point_of_failure: A process, relationship, or system that only this person understands or controls
 - undocumented_critical_process: Something important that has never been written down
 - relationship_at_risk: A client, supplier, or stakeholder relationship that may be fragile during transition
@@ -217,13 +218,94 @@ Risk flag types to check for:
 
 Severity levels: critical, high, medium
 
-Respond with ONLY a JSON array of risk flags found (empty array if none). Each flag must have:
-{{"flag_type": "...", "severity": "...", "description": "...", "recommended_action": "..."}}
+Report every risk flag found with its type, severity, a specific description, and a
+concrete recommended action. Report an empty list if no risk flags are detected.
 
-Example: [{{"flag_type": "single_point_of_failure", "severity": "critical", "description": "Only person who knows the SAP batch scheduling workaround", "recommended_action": "Document the workaround step-by-step before departure"}}]
+Example flag: single_point_of_failure / critical / "Only person who knows the SAP batch
+scheduling workaround" / "Document the workaround step-by-step before departure".
 
-Return [] if no risk flags detected.
+## Entities to extract
+Named people, clients, suppliers, systems/tools, processes, projects, or documents \
+that the answer mentions — anything a successor might need to know about. Use the \
+name exactly as mentioned. Rate importance 'high' only when the handover would be \
+incomplete without exploring that entity further (e.g. a key client contact, a \
+system only they administer). Skip generic terms ("email", "the team") and the \
+employee themself. Report an empty list if no entities are mentioned.
 """
+
+FOLLOWUP_CLASSIFIER_PROMPT_TEMPLATE = """\
+You are a follow-up classifier for an employee knowledge extraction interview. \
+Decide whether asking a follow-up question would surface NEW information worth \
+one more turn of the employee's time.
+
+Interview block: {block}
+
+Question asked: {question}
+
+Answer received: {answer}
+
+Already captured in this block (do NOT chase information that is already here):
+{captured_context}
+
+Rate the expected information gain of a follow-up:
+- high: the answer clearly hints at important undocumented knowledge, a named \
+person/system/process left unexplained, or a risk left hanging
+- medium: the answer is incomplete on a point that matters for the handover
+- low: a follow-up would mostly get the same answer rephrased
+- none: the answer is complete, or there is nothing left to gain
+
+Rules:
+- If the person declined to answer or said they don't know, set is_refusal=true \
+and needs_followup=false — refusals are respected, never chased.
+- Only set needs_followup=true when the gain is medium or high.
+- The suggested follow-up must target the SPECIFIC gap, not be a generic \
+"can you tell me more".
+"""
+
+NO_ANSWERS_YET = "(nothing captured yet)"
+
+
+def build_captured_context(answers: dict, block: str, max_chars: int = 800) -> str:
+    """Summarise what's already been captured for a block, for the follow-up
+    classifier — so it stops chasing information the interview already has."""
+    lines = []
+    prefix = f"{block}."
+    for key in sorted(k for k in answers if k.startswith(prefix)):
+        for entry in answers[key]:
+            snippet = " ".join(str(entry).split())
+            if len(snippet) > 160:
+                snippet = snippet[:157] + "..."
+            if snippet:
+                lines.append(f"- {snippet}")
+    text = "\n".join(lines)
+    if not text:
+        return NO_ANSWERS_YET
+    if len(text) > max_chars:
+        text = text[: max_chars - 3] + "..."
+    return text
+
+
+def build_entity_sweep_instruction(entity: dict) -> str:
+    """Instruction for a targeted probe of an entity that was mentioned but
+    never explored."""
+    name = entity.get("name", "")
+    entity_type = entity.get("entity_type", "other")
+    context = entity.get("context", "")
+    context_part = f' (they said: "{context}")' if context else ""
+    return (
+        f'Earlier in the conversation they mentioned "{name}" ({entity_type})'
+        f"{context_part}, but it was never explored. Ask ONE specific question "
+        f'about "{name}" — what the next person in the role needs to know about it. '
+        f'Refer to "{name}" by name so it is clear what you are asking about.'
+    )
+
+
+PROGRESS_INSTRUCTION_TEMPLATE = (
+    "You are starting a new topic. First, in one short sentence, acknowledge "
+    "finishing the previous topic and mention the progress so far (this is "
+    "section {section_number} of {section_total} — roughly {percent}% through). "
+    "Then ask the question below. Keep the whole message warm and brief."
+)
 
 SINGLE_QUESTION_REPROMPT = (
     "Please rephrase your response to contain exactly ONE question. "

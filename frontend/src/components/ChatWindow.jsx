@@ -11,6 +11,7 @@ export default function ChatWindow({
   stage,
   currentBlock,
   riskFlagCount,
+  progress,
   sessionComplete,
   title,
   children,
@@ -40,6 +41,7 @@ export default function ChatWindow({
           stage={stage}
           currentBlock={currentBlock}
           riskFlagCount={riskFlagCount}
+          progress={progress}
         />
       )}
 

@@ -4,6 +4,7 @@ from langgraph.graph import END, StateGraph
 from agents.stage1_business_interview.nodes import (
     advance_question_node,
     ask_question_node,
+    await_review_response_node,
     corrections_node,
     finalise_node,
     followup_classifier_node,
@@ -33,6 +34,7 @@ def build_stage1_graph(checkpointer=None):
     builder.add_node("advance_question", advance_question_node)
     builder.add_node("profile_generation", profile_generation_node)
     builder.add_node("profile_review", profile_review_node)
+    builder.add_node("await_review_response", await_review_response_node)
     builder.add_node("corrections", corrections_node)
     builder.add_node("finalise", finalise_node)
     builder.add_node("session_close", session_close_node)
@@ -69,9 +71,14 @@ def build_stage1_graph(checkpointer=None):
     # profile_generation -> profile_review
     builder.add_edge("profile_generation", "profile_review")
 
-    # profile_review -> corrections OR finalise (after user input)
+    # profile_review -> await_review_response (interrupt gate — waits for the
+    # manager's response to the review; without it the corrections/finalise
+    # routing would evaluate against the last interview answer)
+    builder.add_edge("profile_review", "await_review_response")
+
+    # await_review_response -> corrections OR finalise (after user input)
     builder.add_conditional_edges(
-        "profile_review",
+        "await_review_response",
         route_after_profile_review,
         {"corrections": "corrections", "finalise": "finalise"},
     )
@@ -91,7 +98,7 @@ def build_stage1_graph(checkpointer=None):
 
     return builder.compile(
         checkpointer=checkpointer,
-        interrupt_before=["process_answer"],
+        interrupt_before=["process_answer", "await_review_response"],
     )
 
 
