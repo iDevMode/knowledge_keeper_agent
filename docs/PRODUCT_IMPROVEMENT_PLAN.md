@@ -175,6 +175,15 @@ Two additional correctness bugs found and fixed during Phase 0 implementation:
 ### Phase 1 — Durability & delivery (Weeks 2–3)
 Postgres/Redis persistence + checkpointing + stateless rehydration (1.3) · history endpoint & frontend restore · object storage for documents · auto-trigger Stage 3 on Stage 2 completion + email delivery with digest (3.5) · consent screen (2.6) · deletion endpoint & retention TTLs (4.3).
 
+**Status — mostly ✅ delivered** (pluggable `STORAGE_BACKEND=memory|persistent`, all backends behind lazy imports and covered by backend-parametrized tests):
+- ✅ **Slice 1** — Redis session/token store + Postgres profile store behind the existing `SessionStore` Protocol.
+- ✅ **Slice 2** — durable LangGraph checkpointing (Postgres) + stateless graph rehydration; any worker/restart can resume any session (previously every endpoint 404'd after a restart).
+- ✅ **Slice 3** — `GET /api/sessions/{id}/history` + frontend transcript restore on refresh (multi-sitting resume).
+- ✅ **Slice 4** — document bytes to object storage (local/S3/R2) + durable document registry; downloads survive restart and work across workers.
+- ✅ **Slice 5** — auto-trigger generation on Stage 2 completion (done in Phase 0) + email delivery of a tokenised link with a manager digest; console/SMTP backends; dashboard email capture.
+- ✅ Deploy config: `.env.example`, `docs/PHASE1_DEPLOYMENT.md`, Railway health-check path fixed to `/api/health`.
+- ⏳ **Deferred to Phase 1b:** GDPR consent screen (2.6) and the deletion endpoint + retention TTLs (4.3) — the persistence layer they depend on now exists.
+
 ### Phase 2 — Interview intelligence (Weeks 3–5)
 Entity inventory + entity-aware questions + block coverage gate (2.1) · information-gain follow-up classifier (2.2) · per-block micro-summaries (2.3) · turn budget + multi-sitting resume (2.3) · progress UI (2.3) · Stage 1 context ingestion & question skipping (2.5) · editable profile review form (2.5) · employee-aware gate + inferred supporting blocks (2.5) · SSE streaming + concurrent classifiers + prompt caching (4.4).
 
