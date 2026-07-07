@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 72
     stage1_to_stage2_link_ttl_hours: int = 168
 
+    # Storage
+    # "memory"     — in-process (dev/tests; lost on restart)
+    # "persistent" — Redis for session state/tokens + Postgres for profiles
+    storage_backend: str = "memory"
+    database_url: str = ""
+    redis_url: str = ""
+
     # Output
     default_output_format: str = "docx"
 
@@ -53,6 +60,20 @@ class Settings(BaseSettings):
             errors.append("ANTHROPIC_API_KEY is not set")
         if self.allowed_origins == "http://localhost:3000" and self.environment != "development":
             errors.append("ALLOWED_ORIGINS is still set to localhost — set to your production domain")
+        if self.storage_backend == "persistent":
+            if not self.redis_url:
+                errors.append("STORAGE_BACKEND=persistent requires REDIS_URL")
+            if not self.database_url:
+                errors.append("STORAGE_BACKEND=persistent requires DATABASE_URL")
+        elif self.environment == "production":
+            # Warn, don't fail — don't take down an existing deploy that hasn't
+            # provisioned Redis/Postgres yet. Flip to persistent when ready.
+            print(
+                "[WARN] STORAGE_BACKEND=memory in production — sessions and profiles "
+                "are lost on restart. Set STORAGE_BACKEND=persistent once Redis and "
+                "Postgres are provisioned.",
+                file=sys.stderr,
+            )
         if errors:
             for err in errors:
                 print(f"[FATAL] {err}", file=sys.stderr)
