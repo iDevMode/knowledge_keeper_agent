@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { sendMessage as sendMessageApi, getSessionStatus } from '../api/client'
+import { sendMessage as sendMessageApi, getSessionStatus, getSessionHistory } from '../api/client'
 
 export default function useChat(sessionId) {
   const [messages, setMessages] = useState([])
@@ -14,6 +14,24 @@ export default function useChat(sessionId) {
   const addAgentMessage = useCallback((content) => {
     setMessages((prev) => [...prev, { role: 'agent', content }])
   }, [])
+
+  // Restore an in-progress conversation after a refresh or a later sitting.
+  // Returns true if a transcript was restored, so callers can skip re-greeting.
+  const restoreHistory = useCallback(async () => {
+    if (!sessionId) return false
+    try {
+      const data = await getSessionHistory(sessionId)
+      if (data.messages && data.messages.length > 0) {
+        setMessages(data.messages.map((m) => ({ role: m.role, content: m.content })))
+        if (data.session_complete) setSessionComplete(true)
+        if (data.current_block) setCurrentBlock(data.current_block)
+        return true
+      }
+    } catch {
+      // Non-critical — fall back to whatever the page does without history
+    }
+    return false
+  }, [sessionId])
 
   const sendMessage = useCallback(
     async (text) => {
@@ -69,6 +87,7 @@ export default function useChat(sessionId) {
     error,
     sendMessage,
     addAgentMessage,
+    restoreHistory,
     setCurrentBlock,
   }
 }

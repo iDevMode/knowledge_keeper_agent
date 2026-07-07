@@ -49,6 +49,12 @@ export async function getSessionStatus(sessionId) {
   return res.json()
 }
 
+export async function getSessionHistory(sessionId) {
+  if (DEMO_MODE) return mock.getSessionHistory(sessionId)
+  const res = await request(`/sessions/${sessionId}/history`)
+  return res.json()
+}
+
 // ── Manager-facing (require the manager token) ───────────────────────────────
 
 export async function getManagerOverview(stage1SessionId, token) {

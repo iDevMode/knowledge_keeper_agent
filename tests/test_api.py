@@ -348,6 +348,38 @@ class TestSessionStatus:
         assert response.status_code == 404
 
 
+# ---- TestSessionHistory ----
+
+class TestSessionHistory:
+    def test_returns_transcript(self, client, mock_llms):
+        create_resp = client.post("/api/sessions/stage1")
+        session_id = create_resp.json()["session_id"]
+        client.post(f"/api/sessions/{session_id}/message", json={"message": "We make widgets."})
+
+        response = client.get(f"/api/sessions/{session_id}/history")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["stage"] == 1
+        roles = [m["role"] for m in data["messages"]]
+        # At least the greeting (agent), the user's answer, and the next question
+        assert "agent" in roles and "user" in roles
+        assert any(m["content"] == "We make widgets." for m in data["messages"])
+
+    def test_history_after_rehydration(self, client, mock_llms):
+        """History works even without a request-scoped instance — it rebuilds
+        from the checkpointer, the property multi-sitting resume relies on."""
+        create_resp = client.post("/api/sessions/stage1")
+        session_id = create_resp.json()["session_id"]
+
+        response = client.get(f"/api/sessions/{session_id}/history")
+        assert response.status_code == 200
+        assert len(response.json()["messages"]) >= 1  # greeting persisted
+
+    def test_rejects_unknown_session(self, client):
+        response = client.get("/api/sessions/nonexistent/history")
+        assert response.status_code == 404
+
+
 # ---- TestManagerDocumentFlow ----
 
 def _setup_completed_stage2(client):

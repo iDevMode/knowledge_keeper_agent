@@ -22,6 +22,7 @@ export default function Stage2Page() {
     error,
     sendMessage,
     addAgentMessage,
+    restoreHistory,
     setCurrentBlock,
   } = useChat(sessionId)
 
@@ -46,14 +47,19 @@ export default function Stage2Page() {
     init()
   }, [inviteToken, sessionId, addAgentMessage, setCurrentBlock])
 
-  // Handle page refresh — session exists in storage but no messages loaded
+  // Handle page refresh / later sitting — session exists in storage but the
+  // in-memory transcript is gone. Restore it from the server.
+  const restoreRef = useRef(false)
   useEffect(() => {
-    if (sessionId && messages.length === 0 && !initializing && !initRef.current) {
-      // Session was restored from sessionStorage but messages are gone
-      // The user will need to continue from where they left off
-      addAgentMessage('Welcome back. Please continue where you left off by sending a message.')
+    if (sessionId && messages.length === 0 && !initializing && !initRef.current && !restoreRef.current) {
+      restoreRef.current = true
+      restoreHistory().then((restored) => {
+        if (!restored) {
+          addAgentMessage('Welcome back. Please continue where you left off by sending a message.')
+        }
+      })
     }
-  }, [sessionId, messages.length, initializing, addAgentMessage])
+  }, [sessionId, messages.length, initializing, restoreHistory, addAgentMessage])
 
   if (initializing) {
     return (

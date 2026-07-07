@@ -5,14 +5,14 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from agents.stage1_business_interview.graph import build_stage1_graph
@@ -59,6 +59,17 @@ class SessionStatusResponse(BaseModel):
     session_complete: bool
     current_block: Optional[str] = None
     current_question_index: Optional[int] = None
+
+class HistoryMessage(BaseModel):
+    role: str  # "agent" | "user"
+    content: str
+
+class SessionHistoryResponse(BaseModel):
+    session_id: str
+    stage: int
+    session_complete: bool
+    current_block: Optional[str] = None
+    messages: List[HistoryMessage] = []
 
 class GenerateDocumentResponse(BaseModel):
     document_id: str
@@ -440,6 +451,43 @@ def get_session_status(session_id: str):
         response.session_complete = state.get("session_complete", False)
 
     return response
+
+
+@app.get("/api/sessions/{session_id}/history", response_model=SessionHistoryResponse)
+def get_session_history(session_id: str):
+    """Return the conversation so far so the UI can restore after a refresh or a
+    later sitting. Scoped to the caller's own session (same access model as
+    /message) — a Stage 2 caller only ever sees their own transcript, never the
+    manager's Stage 1 session."""
+    store = get_session_store()
+
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    instance = _rehydrate_instance(session_id, session)
+
+    messages: List[HistoryMessage] = []
+    current_block = None
+    session_complete = session.get("session_complete", False)
+
+    if instance:
+        state = instance.graph.get_state(instance.config).values
+        session_complete = state.get("session_complete", session_complete)
+        current_block = state.get("current_block")
+        for msg in state.get("conversation_history", []):
+            if isinstance(msg, AIMessage):
+                messages.append(HistoryMessage(role="agent", content=msg.content))
+            elif isinstance(msg, HumanMessage):
+                messages.append(HistoryMessage(role="user", content=msg.content))
+
+    return SessionHistoryResponse(
+        session_id=session_id,
+        stage=session.get("stage", 0),
+        session_complete=session_complete,
+        current_block=current_block,
+        messages=messages,
+    )
 
 
 # ---- Document Generation (manager-facing) ----

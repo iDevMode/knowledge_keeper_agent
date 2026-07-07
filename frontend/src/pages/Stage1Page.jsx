@@ -20,6 +20,7 @@ export default function Stage1Page() {
     error,
     sendMessage,
     addAgentMessage,
+    restoreHistory,
     setCurrentBlock,
   } = useChat(sessionId)
 
@@ -31,8 +32,11 @@ export default function Stage1Page() {
     if (greeting) {
       addAgentMessage(greeting)
       setCurrentBlock('business_context')
+    } else {
+      // Refresh mid-setup — the navigation greeting is gone; restore transcript.
+      restoreHistory()
     }
-  }, [initialized, location.state, addAgentMessage, setCurrentBlock])
+  }, [initialized, location.state, addAgentMessage, restoreHistory, setCurrentBlock])
 
   return (
     <ChatWindow

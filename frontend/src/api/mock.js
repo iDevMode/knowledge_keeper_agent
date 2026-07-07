@@ -234,6 +234,22 @@ export async function getSessionStatus(sessionId) {
   }
 }
 
+export async function getSessionHistory(sessionId) {
+  await delay(300)
+  const session = sessions[sessionId]
+  // Demo mock keeps no server-side transcript; return empty so the page falls
+  // back to its "welcome back" path. Real backend returns the full transcript.
+  if (!session) return { session_id: sessionId, stage: 0, session_complete: false, messages: [] }
+  const getBlock = session.stage === 1 ? getStage1Block : getStage2Block
+  return {
+    session_id: sessionId,
+    stage: session.stage,
+    session_complete: session.complete,
+    current_block: getBlock(session.questionIndex),
+    messages: [],
+  }
+}
+
 // ── Mock document content ────────────────────────────────────────────────────
 
 const MOCK_DOCUMENT_MARKDOWN = `# KnowledgeKeeper — Handover Document
