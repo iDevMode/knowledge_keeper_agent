@@ -131,23 +131,15 @@ class TestGraphRegistry:
         assert instance.stage == 2
         assert instance.config == {"configurable": {"thread_id": "test-s2"}}
 
-    def test_get_returns_instance(self):
+    def test_instance_for_uses_shared_checkpointer(self):
         from api.routes import GraphRegistry
         registry = GraphRegistry()
-        registry.create_stage1("test-s1")
-        assert registry.get("test-s1") is not None
-
-    def test_get_returns_none_for_unknown(self):
-        from api.routes import GraphRegistry
-        registry = GraphRegistry()
-        assert registry.get("nonexistent") is None
-
-    def test_remove(self):
-        from api.routes import GraphRegistry
-        registry = GraphRegistry()
-        registry.create_stage1("test-s1")
-        registry.remove("test-s1")
-        assert registry.get("test-s1") is None
+        i1 = registry.instance_for("s1", 1)
+        i2 = registry.instance_for("s1", 1)
+        # Fresh views, but the same underlying checkpointer — this is what lets
+        # any process/worker resume a session by thread_id.
+        assert i1.checkpointer is i2.checkpointer
+        assert i1.config == {"configurable": {"thread_id": "s1"}}
 
     def test_per_session_locks(self):
         from api.routes import GraphRegistry
@@ -156,6 +148,28 @@ class TestGraphRegistry:
         lock2 = registry.get_lock("s2")
         assert lock1 is not lock2
         assert registry.get_lock("s1") is lock1  # same lock returned
+
+
+class TestStatelessRehydration:
+    def test_session_resumes_from_a_fresh_instance(self, client, mock_llms):
+        """A session created in one instance is resumable from a fresh instance
+        built later — the conversation state lives in the shared checkpointer,
+        not the request-scoped GraphInstance."""
+        import api.routes as routes_mod
+
+        create_resp = client.post("/api/sessions/stage1")
+        session_id = create_resp.json()["session_id"]
+
+        # Simulate a later, unrelated request building its own instance view.
+        fresh = routes_mod._rehydrate_instance(session_id)
+        assert fresh is not None
+        state = fresh.graph.get_state(fresh.config).values
+        assert state.get("conversation_history")  # greeting persisted
+        assert state.get("current_block") == "business_context"
+
+    def test_rehydrate_unknown_session_returns_none(self):
+        import api.routes as routes_mod
+        assert routes_mod._rehydrate_instance("nonexistent") is None
 
 
 # ---- TestCreateStage1 ----
@@ -283,7 +297,7 @@ class TestSendMessage:
 
         # Manually mark graph state as complete
         import api.routes as routes_mod
-        instance = routes_mod._registry.get(session_id)
+        instance = routes_mod._registry.instance_for(session_id, 1)
         instance.graph.update_state(
             instance.config,
             {"session_complete": True},
@@ -349,7 +363,7 @@ def _setup_completed_stage2(client):
     session_id = create_resp.json()["session_id"]
 
     # Mark session as complete in graph state
-    instance = routes_mod._registry.get(session_id)
+    instance = routes_mod._registry.instance_for(session_id, 2)
     instance.graph.update_state(
         instance.config,
         {

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from agents.stage1_business_interview.graph import build_stage1_graph
 from agents.stage2_employee_interview.graph import build_stage2_graph
 from agents.stage3_document_generation.generator import GenerationRequest, generate_document
+from api.persistence.checkpointer import create_checkpointer
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
 from config.settings import settings
@@ -87,41 +88,66 @@ class GraphInstance:
     graph: Any
     config: dict
     stage: int
-    checkpointer: MemorySaver
+    checkpointer: Any
 
 
 class GraphRegistry:
-    def __init__(self):
-        self._instances: Dict[str, GraphInstance] = {}
+    """Builds one compiled graph per stage over a single shared checkpointer.
+
+    A GraphInstance is a lightweight (graph, config, stage) view — the actual
+    conversation state lives in the checkpointer, keyed by thread_id (the
+    session_id). Because the checkpointer is shared and the graphs are stateless
+    to build, an instance for any session can be produced on demand — even in a
+    process that never created it — which is what makes the API stateless and
+    survive restarts (with a durable checkpointer).
+    """
+
+    def __init__(self, checkpointer=None):
+        self._checkpointer = checkpointer or MemorySaver()
+        self._graphs = {
+            1: build_stage1_graph(checkpointer=self._checkpointer),
+            2: build_stage2_graph(checkpointer=self._checkpointer),
+        }
         self._locks: Dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def instance_for(self, session_id: str, stage: int) -> GraphInstance:
+        return GraphInstance(
+            graph=self._graphs[stage],
+            config={"configurable": {"thread_id": session_id}},
+            stage=stage,
+            checkpointer=self._checkpointer,
+        )
 
     def create_stage1(self, session_id: str) -> GraphInstance:
-        checkpointer = MemorySaver()
-        graph = build_stage1_graph(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": session_id}}
-        instance = GraphInstance(graph=graph, config=config, stage=1, checkpointer=checkpointer)
-        self._instances[session_id] = instance
-        return instance
+        return self.instance_for(session_id, 1)
 
     def create_stage2(self, session_id: str) -> GraphInstance:
-        checkpointer = MemorySaver()
-        graph = build_stage2_graph(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": session_id}}
-        instance = GraphInstance(graph=graph, config=config, stage=2, checkpointer=checkpointer)
-        self._instances[session_id] = instance
-        return instance
-
-    def get(self, session_id: str) -> Optional[GraphInstance]:
-        return self._instances.get(session_id)
+        return self.instance_for(session_id, 2)
 
     def get_lock(self, session_id: str) -> threading.Lock:
-        if session_id not in self._locks:
-            self._locks[session_id] = threading.Lock()
-        return self._locks[session_id]
+        with self._locks_guard:
+            if session_id not in self._locks:
+                self._locks[session_id] = threading.Lock()
+            return self._locks[session_id]
 
-    def remove(self, session_id: str) -> None:
-        self._instances.pop(session_id, None)
-        self._locks.pop(session_id, None)
+
+def _rehydrate_instance(session_id: str, session: Optional[dict] = None) -> Optional[GraphInstance]:
+    """Build a graph instance for an existing session, loading state from the
+    (shared, possibly durable) checkpointer. Returns None if the session is
+    unknown or has no persisted conversation state yet."""
+    store = get_session_store()
+    session = session or store.get_session(session_id)
+    if not session:
+        return None
+    stage = session.get("stage")
+    if stage not in (1, 2):
+        return None
+    instance = _registry.instance_for(session_id, stage)
+    # A session with no checkpoint (empty state) can't be resumed.
+    if not instance.graph.get_state(instance.config).values:
+        return None
+    return instance
 
 
 # ---- Graph Invocation Helpers ----
@@ -170,8 +196,9 @@ _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="static-assets")
 
-# Module-level singletons
-_registry = GraphRegistry()
+# Module-level singletons. The registry's checkpointer is durable when
+# STORAGE_BACKEND=persistent, so sessions survive a restart.
+_registry = GraphRegistry(checkpointer=create_checkpointer())
 _document_store: Dict[str, str] = {}  # document_id -> file_path
 _generation_jobs: Dict[str, Dict[str, Any]] = {}  # document_id -> {status, download_url, error}
 _document_owners: Dict[str, str] = {}  # document_id -> stage1_session_id (for manager token checks)
@@ -332,7 +359,7 @@ def send_message(session_id: str, request: SendMessageRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    instance = _registry.get(session_id)
+    instance = _rehydrate_instance(session_id, session)
     if not instance:
         raise HTTPException(status_code=404, detail="No active graph for session")
 
@@ -395,7 +422,7 @@ def get_session_status(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    instance = _registry.get(session_id)
+    instance = _rehydrate_instance(session_id, session)
 
     # Note: deliberately does NOT expose the linked session ID — a Stage 2
     # caller must never learn the manager's Stage 1 session ID.
@@ -428,7 +455,7 @@ def _start_generation_for_stage2(session_id: str, output_format: str) -> str:
     """
     store = get_session_store()
 
-    instance = _registry.get(session_id)
+    instance = _rehydrate_instance(session_id)
     if not instance:
         raise HTTPException(status_code=404, detail="No active graph for session")
 
@@ -497,7 +524,7 @@ def manager_handover_overview(stage1_session_id: str, token: str):
     if stage2_id:
         stage2_status = "in_progress"
         stage2_session = store.get_session(stage2_id)
-        instance = _registry.get(stage2_id)
+        instance = _rehydrate_instance(stage2_id, stage2_session)
         if instance:
             state = instance.graph.get_state(instance.config).values
             if state.get("session_complete"):
