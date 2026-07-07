@@ -80,3 +80,32 @@ class TestHarnessDetectsRegressions:
         assert card.completed
         full_run_questions = 35  # observed with the normal budget
         assert card.questions_asked < full_run_questions
+
+
+# ---- Phase 3: document knowledge-survival scorecard ----
+
+class TestDocumentScorecard:
+    def test_captured_knowledge_survives_to_document(self, persona):
+        from evals.document import score_document
+
+        run = run_interview(persona)
+        card = score_document(run, persona)
+        assert card.document_recall == 1.0, f"dropped in document: {card.missing_fact_ids}"
+        assert card.risk_summary_recall == 1.0
+
+    def test_broken_routing_drops_facts(self, monkeypatch):
+        """A block with no section mapping must lose its facts — proving the
+        scorecard catches routing regressions, not just prints green."""
+        import evals.document as doc_mod
+        from evals.document import score_document
+        from evals.personas import PERSONAS
+
+        broken = dict(doc_mod.BLOCK_TO_SECTION)
+        broken.pop("undocumented_workarounds")
+        monkeypatch.setattr(doc_mod, "BLOCK_TO_SECTION", broken)
+
+        persona = PERSONAS["veteran_ops"]
+        run = run_interview(persona)
+        card = score_document(run, persona)
+        assert card.document_recall < 1.0
+        assert "ops_followup_batch_fix" in card.missing_fact_ids

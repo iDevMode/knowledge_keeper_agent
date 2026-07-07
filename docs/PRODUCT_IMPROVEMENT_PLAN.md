@@ -197,6 +197,14 @@ Entity inventory + entity-aware questions + block coverage gate (2.1) · informa
 ### Phase 3 — Document quality & measurement (Weeks 5–8)
 Extract-then-compose synthesis (3.1) · deterministic redaction (3.2) · document QA gate (3.3) · risk-flag dedup/merge (3.4) · link/artefact capture (2.4) · synthetic-persona eval harness in CI + telemetry funnel (4.5).
 
+**Status — core delivered:**
+- ✅ **Extract-then-compose synthesis (3.1)** — Stage 3 now runs a structured extraction pass (`ExtractedKnowledge` / `KnowledgeItem`) that inventories every discrete piece of knowledge in the transcript, then composes the document from that inventory, so details buried mid-transcript are no longer silently dropped. `SYNTHESIS_MODE=compose` is the default; `single` keeps the legacy one-pass path. These structured items are also the reusable unit for the Phase 4 Notion/Confluence exports.
+- ✅ **Risk-flag dedup/merge (3.4)** — `merge_risk_flags` collapses flags of the same type describing the same underlying risk, keeps the highest severity, unions the source blocks, and sorts by severity, so the Risk Summary stops repeating the same single-point-of-failure once per block.
+- ✅ **Deterministic redaction (3.2)** — confidentiality is enforced in code, not the prompt: a section-name match redacts the whole section; a content match now redacts only the offending paragraph, so one sensitive line no longer discards an otherwise-useful section.
+- ✅ **Document QA gate (3.3)** — an LLM judge scores each draft against a rubric (completeness, risk coverage, actionability, gap honesty); below `QA_GATE_MIN_SCORE` (default 0.7) it regenerates once with the judge's concrete issues. Injectable and a no-op without a key, so it never blocks delivery.
+- ✅ **Document eval (4.5 extension)** — the eval harness now scores end to end (`--document`): does the knowledge the interview *captured* survive into the *document*? Scripted mode routes captured answers through the real Stage 3 parse pipeline and reports captured→document recall + risks-in-summary; a deliberate routing-break test proves the scorecard catches drops. Current result: **100% captured→document recall across all personas.**
+- 🔲 Remaining: link/artefact capture (2.4) · production telemetry funnel (4.5).
+
 ### Phase 4 — Expansion (Post-MVP, aligns with existing Phase 2 scope)
 Manager dashboard (live block progress, risk flags as they surface, gap list) · Notion/Confluence/SharePoint export reusing 3.1's structured KnowledgeItems · multi-role/bulk sessions · voice-based interview option · knowledge-base mode (query past handovers).
 

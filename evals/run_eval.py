@@ -19,6 +19,7 @@ import logging
 import sys
 from pathlib import Path
 
+from evals.document import score_document
 from evals.personas import PERSONAS
 from evals.scorecard import render_markdown, score_run
 from evals.simulator import run_interview
@@ -32,6 +33,8 @@ def main(argv=None) -> int:
     parser.add_argument("--transcripts", default=None, help="directory to dump transcripts")
     parser.add_argument("--min-recall", type=float, default=None,
                         help="fail (exit 1) if overall recall is below this")
+    parser.add_argument("--document", action="store_true",
+                        help="also score whether captured knowledge survives into the document")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -44,11 +47,15 @@ def main(argv=None) -> int:
         return 2
 
     cards = []
+    doc_cards = []
     for pid in ids:
         persona = PERSONAS[pid]
         print(f"Running {'live' if args.live else 'scripted'} interview: {pid} ...", file=sys.stderr)
         run = run_interview(persona, live=args.live)
         cards.append(score_run(run, persona))
+
+        if args.document:
+            doc_cards.append(score_document(run, persona, live=args.live))
 
         if args.transcripts:
             out_dir = Path(args.transcripts)
@@ -69,9 +76,24 @@ def main(argv=None) -> int:
 
     print(render_markdown(cards))
 
+    if doc_cards:
+        print("\n## Document knowledge survival\n")
+        print("| Persona | Captured→document recall | Risks in summary | Missing |")
+        print("|---|---|---|---|")
+        for d in doc_cards:
+            missing = ", ".join(d.missing_fact_ids) or "none"
+            print(
+                f"| {d.persona_id} | {d.facts_in_document}/{d.facts_total} "
+                f"({round(100 * d.document_recall)}%) "
+                f"| {d.risks_in_summary}/{d.risks_expected} | {missing} |"
+            )
+
     if args.out:
+        payload = {"interview": [c.model_dump() for c in cards]}
+        if doc_cards:
+            payload["document"] = [d.model_dump() for d in doc_cards]
         with open(args.out, "w") as f:
-            json.dump([c.model_dump() for c in cards], f, indent=2)
+            json.dump(payload, f, indent=2)
 
     total_facts = sum(c.facts_total for c in cards)
     overall = sum(c.facts_captured for c in cards) / total_facts if total_facts else 1.0

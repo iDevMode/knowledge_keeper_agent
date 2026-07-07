@@ -72,6 +72,23 @@ lobotomises the follow-up classifier, squeezes the budget) and asserts the
 scorecard goes red — so the harness itself is proven able to catch
 regressions.
 
+## Document knowledge survival (`--document`)
+
+`python -m evals.run_eval --document` extends the eval end to end: after each
+interview it builds the handover document and measures whether the knowledge
+the interview *captured* survives into the *document* a successor receives —
+**captured→document recall**, per reveal type, plus how many risks reach the
+Risk Summary.
+
+- **Scripted** routes each interview block's captured answers into its handover
+  section (`evals/document.py::BLOCK_TO_SECTION`) and parses the result through
+  the real Stage 3 pipeline (`parse_llm_output` + confidentiality filter). This
+  measures the assembly plumbing — a block→section routing bug that dropped a
+  block would show as recall < 100%. `tests/test_evals.py` proves this by
+  deleting a mapping and asserting the dropped facts go missing.
+- **Live** calls the real `generate_document` (extract-then-compose + QA gate)
+  and scores the model's actual synthesis fidelity.
+
 ## Adding a persona
 
 Add a `Persona` to `evals/personas.py` with facts spread across reveal types
