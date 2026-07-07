@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     # Output
     default_output_format: str = "docx"
 
+    # Document synthesis (Stage 3):
+    # "compose" — extract structured knowledge items first, then compose the
+    #             document from them (nothing dropped; default).
+    # "single"  — one-pass generation from the raw transcript (legacy fallback).
+    synthesis_mode: str = "compose"
+    # LLM-judge QA gate: score the generated document against a rubric before
+    # delivery and regenerate once if it falls below the threshold.
+    enable_qa_gate: bool = True
+    qa_gate_min_score: float = 0.7
+
     # Document storage: "local" (filesystem; fine for a single persistent
     # container, lost on ephemeral/serverless disks) or "s3" (S3/R2/any
     # S3-compatible; required for multi-worker or serverless deploys).

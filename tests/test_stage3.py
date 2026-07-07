@@ -568,3 +568,249 @@ class TestIntegration:
         # relationship_heavy has no confidential sections
         for section in doc.sections:
             assert section.is_confidential is False
+
+
+# ---- Phase 3: risk-flag dedup/merge (3.4) ----
+
+class TestRiskFlagMerge:
+    def _flag(self, ftype="single_point_of_failure", sev="high", desc="", action="do it", block="b", idx=0):
+        return RiskFlag(flag_type=ftype, severity=sev, description=desc,
+                        recommended_action=action, source_block=block, source_question_index=idx)
+
+    def test_duplicate_flags_merged(self):
+        from models.risk_flags import merge_risk_flags
+        flags = [
+            self._flag(desc="Only person who knows the SAP batch scheduling workaround", block="processes"),
+            self._flag(desc="SAP batch scheduling workaround known only to this employee", block="workarounds"),
+        ]
+        merged = merge_risk_flags(flags)
+        assert len(merged) == 1
+        assert "multiple" in merged[0].source_block
+
+    def test_distinct_flags_not_merged(self):
+        from models.risk_flags import merge_risk_flags
+        flags = [
+            self._flag(desc="Only person who knows the SAP batch scheduling workaround"),
+            self._flag(desc="Sole administrator of the Power BI workspace credentials"),
+        ]
+        merged = merge_risk_flags(flags)
+        assert len(merged) == 2
+
+    def test_different_types_not_merged(self):
+        from models.risk_flags import merge_risk_flags
+        flags = [
+            self._flag(ftype="single_point_of_failure", desc="SAP workaround known only to them"),
+            self._flag(ftype="access_credential_gap", desc="SAP workaround known only to them"),
+        ]
+        merged = merge_risk_flags(flags)
+        assert len(merged) == 2
+
+    def test_merge_keeps_highest_severity(self):
+        from models.risk_flags import merge_risk_flags
+        flags = [
+            self._flag(sev="medium", desc="Only person who runs the nightly reconciliation job"),
+            self._flag(sev="critical", desc="Nightly reconciliation job run only by this person"),
+        ]
+        merged = merge_risk_flags(flags)
+        assert merged[0].severity.value == "critical"
+
+    def test_merged_sorted_by_severity(self):
+        from models.risk_flags import merge_risk_flags
+        flags = [
+            self._flag(sev="medium", desc="Medium unique risk about vendor contracts"),
+            self._flag(sev="critical", desc="Critical unique risk about database access"),
+        ]
+        merged = merge_risk_flags(flags)
+        assert merged[0].severity.value == "critical"
+        assert merged[1].severity.value == "medium"
+
+    def test_empty_list(self):
+        from models.risk_flags import merge_risk_flags
+        assert merge_risk_flags([]) == []
+
+
+# ---- Phase 3: extract-then-compose synthesis (3.1) ----
+
+class TestExtractThenCompose:
+    def _fake_primary_factory(self, extracted):
+        """A fake primary LLM whose structured extraction returns `extracted`."""
+        def factory(max_tokens):
+            llm = MagicMock()
+            structured = MagicMock()
+            structured.invoke.return_value = extracted
+            llm.with_structured_output.return_value = structured
+            return llm
+        return factory
+
+    def test_compose_mode_uses_extracted_items(self, monkeypatch):
+        from config import llm_provider
+        from config.settings import settings as app_settings
+        from models.knowledge_item import ExtractedKnowledge, KnowledgeItem
+
+        monkeypatch.setattr(app_settings, "synthesis_mode", "compose")
+        monkeypatch.setattr(app_settings, "enable_qa_gate", False)
+
+        extracted = ExtractedKnowledge(items=[
+            KnowledgeItem(category="undocumented_knowledge", title="SAP workaround",
+                          detail="Custom Monday process", importance="critical"),
+        ])
+        llm_provider.set_llm_factories(primary=self._fake_primary_factory(extracted))
+        try:
+            with patch("agents.stage3_document_generation.generator._stream_generation") as mock_stream:
+                mock_stream.return_value = _build_valid_markdown()
+                req = _make_generation_request("process_heavy")
+                result = generate_document(req)
+                assert result.extracted is not None
+                assert len(result.extracted.items) == 1
+                assert result.generation_metadata["synthesis_mode"] == "compose"
+                assert result.generation_metadata["extracted_item_count"] == 1
+                # The composer received the extracted inventory in its context.
+                sent_context = mock_stream.call_args[0][2]
+                assert "SAP workaround" in sent_context
+        finally:
+            llm_provider.reset_llm_factories()
+
+    def test_single_mode_still_works(self, monkeypatch):
+        from config.settings import settings as app_settings
+        monkeypatch.setattr(app_settings, "synthesis_mode", "single")
+        monkeypatch.setattr(app_settings, "enable_qa_gate", False)
+
+        with patch("agents.stage3_document_generation.generator._stream_generation") as mock_stream:
+            mock_stream.return_value = _build_valid_markdown()
+            req = _make_generation_request("process_heavy")
+            result = generate_document(req)
+            assert result.extracted is None
+            assert result.generation_metadata["synthesis_mode"] == "single"
+
+    def test_extraction_failure_falls_back_to_empty_inventory(self, monkeypatch):
+        from config import llm_provider
+        from config.settings import settings as app_settings
+        monkeypatch.setattr(app_settings, "synthesis_mode", "compose")
+        monkeypatch.setattr(app_settings, "enable_qa_gate", False)
+
+        def failing_factory(max_tokens):
+            llm = MagicMock()
+            llm.with_structured_output.return_value.invoke.side_effect = Exception("API down")
+            return llm
+        llm_provider.set_llm_factories(primary=failing_factory)
+        try:
+            with patch("agents.stage3_document_generation.generator._stream_generation") as mock_stream:
+                mock_stream.return_value = _build_valid_markdown()
+                req = _make_generation_request("process_heavy")
+                result = generate_document(req)  # must not raise
+                assert result.extracted.items == []
+        finally:
+            llm_provider.reset_llm_factories()
+
+
+# ---- Phase 3: QA gate (3.3) ----
+
+class TestQAGate:
+    def _judge_factory(self, extracted, report_sequence):
+        """Fake primary: structured extraction returns items OR a QA report,
+        chosen by the schema requested."""
+        from models.document_qa import DocumentQAReport
+        from models.knowledge_item import ExtractedKnowledge
+
+        reports = list(report_sequence)
+
+        def factory(max_tokens):
+            llm = MagicMock()
+
+            def with_structured(schema):
+                s = MagicMock()
+                if schema is DocumentQAReport:
+                    s.invoke.side_effect = lambda msgs: reports.pop(0)
+                else:  # ExtractedKnowledge
+                    s.invoke.return_value = extracted
+                return s
+
+            llm.with_structured_output.side_effect = with_structured
+            return llm
+        return factory
+
+    def test_low_score_triggers_regeneration(self, monkeypatch):
+        from config import llm_provider
+        from config.settings import settings as app_settings
+        from models.document_qa import DocumentQAReport
+        from models.knowledge_item import ExtractedKnowledge
+
+        monkeypatch.setattr(app_settings, "synthesis_mode", "compose")
+        monkeypatch.setattr(app_settings, "enable_qa_gate", True)
+        monkeypatch.setattr(app_settings, "qa_gate_min_score", 0.7)
+
+        low = DocumentQAReport(completeness=0.4, risk_coverage=0.4, actionability=0.4,
+                               gap_honesty=0.4, issues=["Risk Summary missing an action"])
+        high = DocumentQAReport(completeness=0.95, risk_coverage=0.95, actionability=0.9, gap_honesty=0.9)
+        llm_provider.set_llm_factories(
+            primary=self._judge_factory(ExtractedKnowledge(items=[]), [low, high])
+        )
+        try:
+            with patch("agents.stage3_document_generation.generator._stream_generation") as mock_stream:
+                mock_stream.return_value = _build_valid_markdown()
+                req = _make_generation_request("process_heavy")
+                result = generate_document(req)
+                # Composed twice: initial draft + one regeneration.
+                assert mock_stream.call_count == 2
+                assert result.generation_metadata["qa_score"] == high.overall
+        finally:
+            llm_provider.reset_llm_factories()
+
+    def test_high_score_no_regeneration(self, monkeypatch):
+        from config import llm_provider
+        from config.settings import settings as app_settings
+        from models.document_qa import DocumentQAReport
+        from models.knowledge_item import ExtractedKnowledge
+
+        monkeypatch.setattr(app_settings, "synthesis_mode", "compose")
+        monkeypatch.setattr(app_settings, "enable_qa_gate", True)
+
+        high = DocumentQAReport(completeness=0.95, risk_coverage=0.9, actionability=0.9, gap_honesty=0.9)
+        llm_provider.set_llm_factories(
+            primary=self._judge_factory(ExtractedKnowledge(items=[]), [high])
+        )
+        try:
+            with patch("agents.stage3_document_generation.generator._stream_generation") as mock_stream:
+                mock_stream.return_value = _build_valid_markdown()
+                req = _make_generation_request("process_heavy")
+                result = generate_document(req)
+                assert mock_stream.call_count == 1
+                assert result.generation_metadata["qa_score"] == high.overall
+        finally:
+            llm_provider.reset_llm_factories()
+
+
+# ---- Phase 3: deterministic paragraph-level redaction (3.2) ----
+
+class TestParagraphRedaction:
+    def test_section_name_match_redacts_whole_section(self):
+        sections = [
+            DocumentSection(name="Salary Information", heading="Salary Information",
+                            content_markdown="Base pay is X.\n\nBonus is Y.", section_number=1),
+        ]
+        result = _apply_confidentiality_filter(sections, "salary")
+        assert result[0].content_markdown == CONFIDENTIAL_PLACEHOLDER
+        assert result[0].is_confidential is True
+
+    def test_content_match_redacts_only_matching_paragraph(self):
+        sections = [
+            DocumentSection(
+                name="Team Notes", heading="Team Notes",
+                content_markdown="Alice is a strong performer.\n\nBob has a performance issue on file.\n\nCarol mentors juniors.",
+                section_number=1),
+        ]
+        result = _apply_confidentiality_filter(sections, "performance issue")
+        parts = result[0].content_markdown.split("\n\n")
+        assert parts[0] == "Alice is a strong performer."
+        assert parts[1] == CONFIDENTIAL_PLACEHOLDER
+        assert parts[2] == "Carol mentors juniors."
+        assert result[0].is_confidential is True
+
+    def test_no_match_leaves_section_untouched(self):
+        sections = [
+            DocumentSection(name="Systems", heading="Systems",
+                            content_markdown="We use SAP and Power BI.", section_number=1),
+        ]
+        result = _apply_confidentiality_filter(sections, "salary")
+        assert result[0].content_markdown == "We use SAP and Power BI."
+        assert result[0].is_confidential is False

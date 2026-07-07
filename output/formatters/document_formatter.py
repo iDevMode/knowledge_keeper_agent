@@ -86,20 +86,41 @@ def _apply_confidentiality_filter(
     sections: List[DocumentSection],
     confidential_sections_text: str,
 ) -> List[DocumentSection]:
-    """Mark sections as confidential based on keyword matching."""
-    # Extract keywords from the confidential sections text
-    # Split on common separators
+    """Deterministically redact confidential content (plan 3.2).
+
+    Redaction is enforced in code, not left to the generation prompt:
+
+    - If a confidential keyword matches the section *name/heading*, the whole
+      section is a designated confidential section and is fully redacted.
+    - Otherwise redaction is *paragraph-level*: only paragraphs that mention a
+      confidential keyword are replaced, so a single sensitive detail no longer
+      forces the entire (otherwise useful) section to be discarded.
+    """
     keywords = re.split(r"[,;]|\band\b", confidential_sections_text.lower())
     keywords = [kw.strip() for kw in keywords if kw.strip()]
+    if not keywords:
+        return sections
 
     for section in sections:
         name_lower = section.name.lower()
-        content_preview = section.content_markdown[:200].lower()
 
-        for keyword in keywords:
-            if keyword in name_lower or keyword in content_preview:
-                section.is_confidential = True
-                section.content_markdown = CONFIDENTIAL_PLACEHOLDER
-                break
+        if any(kw in name_lower for kw in keywords):
+            section.is_confidential = True
+            section.content_markdown = CONFIDENTIAL_PLACEHOLDER
+            continue
+
+        # Paragraph-level redaction within an otherwise-retained section.
+        paragraphs = section.content_markdown.split("\n\n")
+        redacted_any = False
+        new_paragraphs = []
+        for para in paragraphs:
+            if any(kw in para.lower() for kw in keywords):
+                new_paragraphs.append(CONFIDENTIAL_PLACEHOLDER)
+                redacted_any = True
+            else:
+                new_paragraphs.append(para)
+        if redacted_any:
+            section.is_confidential = True
+            section.content_markdown = "\n\n".join(new_paragraphs)
 
     return sections

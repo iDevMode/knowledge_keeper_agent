@@ -11,6 +11,55 @@ from models.risk_flags import RiskFlag
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
 
+EXTRACTION_SYSTEM_PROMPT = """\
+You are KnowledgeKeeper's knowledge-extraction pass. You are given a Role Intelligence Profile \
+and the full transcript of an employee handover interview.
+
+Your job is to extract EVERY discrete piece of handover knowledge in the transcript as a separate \
+structured item. This is an inventory pass, not a writing pass — be exhaustive. A successor will \
+rely on this inventory, so a detail you drop here is a detail lost forever.
+
+For each item:
+- Choose the category it belongs in (role_overview, knowledge_transfer, key_relationships, \
+systems_and_access, in_flight_items, decision_making, undocumented_knowledge, advice, onboarding, \
+knowledge_gap).
+- Write the `detail` as clear, synthesised prose the successor can act on — what it is, why it \
+matters, how to do it — never a verbatim quote.
+- List any named entities involved (people, clients, systems, documents).
+- Mark `is_gap: true` for anything the employee could NOT answer, answered only partially, or \
+that was flagged as missing — capture the gap explicitly rather than omitting it.
+- Set importance honestly (critical/high/medium/low).
+
+Extract many small, specific items rather than a few broad ones. Do not merge unrelated facts. \
+Do not invent anything not supported by the transcript.\
+"""
+
+
+COMPOSE_SYSTEM_PROMPT = """\
+You are KnowledgeKeeper's composition pass. You are given the Role Intelligence Profile, a \
+pre-extracted INVENTORY of knowledge items (already grouped by section), and a de-duplicated \
+risk summary.
+
+Your task is to compose the final Handover Intelligence Document from this inventory. Every item \
+in the inventory MUST appear in the document, placed in its section and woven into readable, \
+professional prose — as though written by a senior consultant who understands the role. You are \
+composing a complete inventory into a document; you are not summarising and you must not drop items.
+
+## DOCUMENT GENERATION RULES
+
+- Write in clear, professional prose. Use headers and sub-sections for navigation. Use bullet \
+points only for lists of items (contacts, tools, tasks) — never for narrative content.
+- Write for the incoming replacement — assume they are competent but have no prior context about \
+this specific business, role, or environment.
+- Items marked as gaps must be surfaced with [GAP: brief description of what is missing] — never \
+gloss over them.
+- The de-duplicated risk summary appears prominently in the Risk Summary section at the top.
+- Calibrate the depth of each section to the knowledge priority ranking from Stage 1.
+- Each section MUST begin with the exact sentinel marker format: ### SECTION: [Section Name]
+- Do not use any other heading format for section delimiters.\
+"""
+
+
 STAGE3_SYSTEM_PROMPT = """\
 You are KnowledgeKeeper. You have now completed both the business interview (Stage 1) and the \
 employee interview (Stage 2). You have a complete Role Intelligence Profile and a full interview \
@@ -107,6 +156,75 @@ def build_context_block(
     parts.append("\n")
     parts.append(_build_generation_instruction(profile, answers, risk_flags))
 
+    return "\n".join(parts)
+
+
+def build_extraction_context(
+    profile: RoleIntelligenceProfile,
+    conversation_history: List[BaseMessage],
+    answers: Dict[str, Any],
+    block_order: List[str],
+    block_depths: Dict[str, str],
+) -> str:
+    """Context for the extraction pass: profile + full transcript, no writing
+    instruction — the extractor's job is defined entirely by its system prompt
+    and the structured-output schema."""
+    parts = [
+        "## ROLE INTELLIGENCE PROFILE\n",
+        _format_profile_for_context(profile),
+        "\n## INTERVIEW TRANSCRIPT BY BLOCK\n",
+        _format_answers_by_block(answers, block_order, block_depths),
+    ]
+    excerpts = _format_conversation_excerpts(conversation_history)
+    if excerpts:
+        parts.append("\n## KEY CONVERSATION EXCHANGES\n")
+        parts.append(excerpts)
+    parts.append(
+        "\n## INSTRUCTION\n\nExtract every discrete knowledge item from the "
+        "transcript above as structured items. Be exhaustive."
+    )
+    return "\n".join(parts)
+
+
+def _format_extracted_items(items: List[Any]) -> str:
+    """Render extracted KnowledgeItems grouped by category for the composer."""
+    if not items:
+        return "(no items extracted)"
+
+    by_category: Dict[str, List[Any]] = {}
+    for item in items:
+        by_category.setdefault(item.category, []).append(item)
+
+    lines = []
+    for category, group in by_category.items():
+        lines.append(f"### {category.replace('_', ' ').title()}")
+        for item in group:
+            gap = " [GAP]" if item.is_gap else ""
+            entities = f" (entities: {', '.join(item.entities)})" if item.entities else ""
+            lines.append(f"- [{item.importance}]{gap} {item.title}: {item.detail}{entities}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_compose_context(
+    profile: RoleIntelligenceProfile,
+    items: List[Any],
+    risk_flags: List[RiskFlag],
+    answers: Dict[str, Any],
+) -> str:
+    """Context for the composition pass: profile + extracted inventory +
+    de-duplicated risks + the section-by-section generation instruction."""
+    parts = [
+        "## ROLE INTELLIGENCE PROFILE\n",
+        _format_profile_for_context(profile),
+    ]
+    if risk_flags:
+        parts.append("\n## DE-DUPLICATED RISK FLAGS\n")
+        parts.append(_format_risk_flags(risk_flags))
+    parts.append("\n## EXTRACTED KNOWLEDGE INVENTORY\n")
+    parts.append(_format_extracted_items(items))
+    parts.append("\n")
+    parts.append(_build_generation_instruction(profile, answers, risk_flags))
     return "\n".join(parts)
 
 
