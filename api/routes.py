@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import uuid
@@ -7,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +20,8 @@ from agents.stage1_business_interview.graph import build_stage1_graph
 from agents.stage2_employee_interview.graph import build_stage2_graph
 from agents.stage3_document_generation.generator import GenerationRequest, generate_document
 from api.persistence.checkpointer import create_checkpointer
+from api.persistence.document_registry import create_document_registry
+from api.persistence.document_store import create_blob_store
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
 from config.settings import settings
@@ -210,9 +213,16 @@ if _FRONTEND_DIST.exists():
 # Module-level singletons. The registry's checkpointer is durable when
 # STORAGE_BACKEND=persistent, so sessions survive a restart.
 _registry = GraphRegistry(checkpointer=create_checkpointer())
-_document_store: Dict[str, str] = {}  # document_id -> file_path
-_generation_jobs: Dict[str, Dict[str, Any]] = {}  # document_id -> {status, download_url, error}
-_document_owners: Dict[str, str] = {}  # document_id -> stage1_session_id (for manager token checks)
+# Generated documents: bytes in the blob store, metadata/status in the registry.
+# Both are durable/shared under the persistent backend so downloads survive a
+# restart and work across workers.
+_blob_store = create_blob_store()
+_doc_registry = create_document_registry()
+
+_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 
 
 # ---- Background Generation Worker ----
@@ -224,45 +234,45 @@ def _run_generation_in_background(
     profile: Any,
     output_format: str,
 ):
-    """Run document generation in a background thread."""
+    """Run document generation in a background thread, then store the bytes in
+    the blob store and record completion in the document registry."""
     try:
         gen_result = generate_document(gen_request)
-
-        # Parse and export
         interim_doc = parse_llm_output(gen_result.raw_markdown, profile, session_id)
 
-        output_dir = tempfile.mkdtemp(prefix="kk_")
+        tmp_dir = tempfile.mkdtemp(prefix="kk_")
+        try:
+            ext = "docx"
+            if output_format == "pdf":
+                try:
+                    from output.exporters.pdf_exporter import generate_pdf
+                    path = generate_pdf(interim_doc, os.path.join(tmp_dir, f"{document_id}.pdf"))
+                    ext = "pdf"
+                except (ImportError, RuntimeError) as e:
+                    logger.warning("PDF export unavailable (%s), falling back to DOCX", e)
+                    path = generate_docx(interim_doc, os.path.join(tmp_dir, f"{document_id}.docx"))
+            else:
+                path = generate_docx(interim_doc, os.path.join(tmp_dir, f"{document_id}.docx"))
+            with open(path, "rb") as fh:
+                data = fh.read()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        if output_format == "pdf":
-            try:
-                from output.exporters.pdf_exporter import generate_pdf
-                file_path = os.path.join(output_dir, f"{document_id}.pdf")
-                file_path = generate_pdf(interim_doc, file_path)
-            except (ImportError, RuntimeError) as e:
-                logger.warning("PDF export unavailable (%s), falling back to DOCX", e)
-                file_path = os.path.join(output_dir, f"{document_id}.docx")
-                file_path = generate_docx(interim_doc, file_path)
-        else:
-            file_path = os.path.join(output_dir, f"{document_id}.docx")
-            file_path = generate_docx(interim_doc, file_path)
+        key = f"{document_id}.{ext}"
+        _blob_store.put(key, data)
+        _doc_registry.mark_complete(
+            document_id,
+            key=key,
+            content_type=_CONTENT_TYPES[ext],
+            filename=f"KnowledgeKeeper-Handover.{ext}",
+        )
 
-        _document_store[document_id] = file_path
-        _generation_jobs[document_id] = {
-            "status": "complete",
-            "download_url": f"/api/documents/{document_id}",
-            "error": None,
-        }
-
-        on_document_generated(session_id, document_id, file_path)
-        logger.info("session=%s document=%s format=%s generation=complete", session_id, document_id, output_format)
+        on_document_generated(session_id, document_id, key)
+        logger.info("session=%s document=%s format=%s generation=complete", session_id, document_id, ext)
 
     except Exception as e:
         logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
-        _generation_jobs[document_id] = {
-            "status": "failed",
-            "download_url": None,
-            "error": str(e),
-        }
+        _doc_registry.mark_failed(document_id, str(e))
 
 
 # ---- Endpoints ----
@@ -531,14 +541,8 @@ def _start_generation_for_stage2(session_id: str, output_format: str) -> str:
     )
 
     document_id = str(uuid.uuid4())
-    _document_owners[document_id] = stage1_id
+    _doc_registry.create(document_id, owner_id=stage1_id, fmt=output_format)
     store.update_session(stage1_id, {"latest_document_id": document_id})
-
-    _generation_jobs[document_id] = {
-        "status": "generating",
-        "download_url": None,
-        "error": None,
-    }
 
     thread = threading.Thread(
         target=_run_generation_in_background,
@@ -583,16 +587,17 @@ def manager_handover_overview(stage1_session_id: str, token: str):
 
     stage1_session = store.get_session(stage1_session_id) or {}
     document_id = stage1_session.get("latest_document_id")
-    job = _generation_jobs.get(document_id) if document_id else None
+    meta = _doc_registry.get(document_id) if document_id else None
+    complete = bool(meta and meta["status"] == "complete")
 
     return ManagerOverviewResponse(
         stage1_session_id=stage1_session_id,
         stage2_status=stage2_status,
         risk_flag_count=risk_flag_count,
         document_id=document_id,
-        document_status=job["status"] if job else None,
-        download_url=job.get("download_url") if job else None,
-        document_error=job.get("error") if job else None,
+        document_status=meta["status"] if meta else None,
+        download_url=f"/api/documents/{document_id}" if complete else None,
+        document_error=meta.get("error") if meta else None,
     )
 
 
@@ -619,40 +624,40 @@ def manager_generate_document(stage1_session_id: str, request: GenerateDocumentR
 @app.get("/api/documents/{document_id}/status", response_model=GenerationStatusResponse)
 def get_generation_status(document_id: str, token: str):
     """Poll for document generation status (manager token required)."""
-    stage1_id = _document_owners.get(document_id)
-    if not stage1_id:
+    meta = _doc_registry.get(document_id)
+    if not meta:
         raise HTTPException(status_code=404, detail="Document generation job not found")
-    _require_manager_token(stage1_id, token)
+    _require_manager_token(meta["owner_id"], token)
 
-    job = _generation_jobs.get(document_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Document generation job not found")
-
+    complete = meta["status"] == "complete"
     return GenerationStatusResponse(
         document_id=document_id,
-        status=job["status"],
-        download_url=job.get("download_url"),
-        error=job.get("error"),
+        status=meta["status"],
+        download_url=f"/api/documents/{document_id}" if complete else None,
+        error=meta.get("error"),
     )
 
 
 @app.get("/api/documents/{document_id}")
 def download_document(document_id: str, token: str):
     """Download a generated handover document (manager token required)."""
-    stage1_id = _document_owners.get(document_id)
-    if not stage1_id:
+    meta = _doc_registry.get(document_id)
+    if not meta:
         raise HTTPException(status_code=404, detail="Document not found")
-    _require_manager_token(stage1_id, token)
+    _require_manager_token(meta["owner_id"], token)
 
-    file_path = _document_store.get(document_id)
-    if not file_path or not os.path.exists(file_path):
+    if meta["status"] != "complete" or not meta.get("key"):
+        raise HTTPException(status_code=404, detail="Document not ready")
+
+    data = _blob_store.read(meta["key"])
+    if data is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    filename = os.path.basename(file_path)
-    media_type = "application/pdf" if file_path.endswith(".pdf") else (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return Response(
+        content=data,
+        media_type=meta["content_type"],
+        headers={"Content-Disposition": f'attachment; filename="{meta["filename"]}"'},
     )
-    return FileResponse(path=file_path, filename=filename, media_type=media_type)
 
 
 # ---- SPA Fallback (must be last) ----

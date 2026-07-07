@@ -70,9 +70,8 @@ def reset_singletons():
 
     # Reset graph registry and document stores
     routes_mod._registry = routes_mod.GraphRegistry()
-    routes_mod._document_store = {}
-    routes_mod._generation_jobs = {}
-    routes_mod._document_owners = {}
+    routes_mod._doc_registry = routes_mod.create_document_registry()
+    routes_mod._blob_store = routes_mod.create_blob_store()
 
     yield
 
@@ -480,38 +479,43 @@ class TestDownloadDocument:
     def _store_document(self, stage1_id):
         import api.routes as routes_mod
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
-        tmp.write(b"fake docx content")
-        tmp.close()
-
         doc_id = "test-doc-id"
-        routes_mod._document_store[doc_id] = tmp.name
-        routes_mod._document_owners[doc_id] = stage1_id
-        return doc_id, tmp.name
+        routes_mod._doc_registry.create(doc_id, owner_id=stage1_id, fmt="docx")
+        routes_mod._blob_store.put(f"{doc_id}.docx", b"fake docx content")
+        routes_mod._doc_registry.mark_complete(
+            doc_id,
+            key=f"{doc_id}.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="KnowledgeKeeper-Handover.docx",
+        )
+        return doc_id
 
     def test_returns_file_with_manager_token(self, client, mock_llms):
         stage1_id, _, manager_token = _setup_stage1_with_profile()
-        doc_id, path = self._store_document(stage1_id)
+        doc_id = self._store_document(stage1_id)
 
-        try:
-            response = client.get(f"/api/documents/{doc_id}?token={manager_token}")
-            assert response.status_code == 200
-            assert response.content == b"fake docx content"
-        finally:
-            os.unlink(path)
+        response = client.get(f"/api/documents/{doc_id}?token={manager_token}")
+        assert response.status_code == 200
+        assert response.content == b"fake docx content"
+        assert "KnowledgeKeeper-Handover.docx" in response.headers.get("content-disposition", "")
 
     def test_rejects_missing_token(self, client, mock_llms):
         stage1_id, _, _ = _setup_stage1_with_profile()
-        doc_id, path = self._store_document(stage1_id)
+        doc_id = self._store_document(stage1_id)
 
-        try:
-            response = client.get(f"/api/documents/{doc_id}")
-            assert response.status_code == 422  # token query param is required
+        response = client.get(f"/api/documents/{doc_id}")
+        assert response.status_code == 422  # token query param is required
 
-            response = client.get(f"/api/documents/{doc_id}?token=wrong")
-            assert response.status_code == 403
-        finally:
-            os.unlink(path)
+        response = client.get(f"/api/documents/{doc_id}?token=wrong")
+        assert response.status_code == 403
+
+    def test_download_not_ready_returns_404(self, client, mock_llms):
+        import api.routes as routes_mod
+        stage1_id, _, manager_token = _setup_stage1_with_profile()
+        routes_mod._doc_registry.create("pending-doc", owner_id=stage1_id, fmt="docx")
+
+        response = client.get(f"/api/documents/pending-doc?token={manager_token}")
+        assert response.status_code == 404
 
     def test_rejects_unknown_document_id(self, client):
         response = client.get("/api/documents/nonexistent?token=anything")

@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     # Output
     default_output_format: str = "docx"
 
+    # Document storage: "local" (filesystem; fine for a single persistent
+    # container, lost on ephemeral/serverless disks) or "s3" (S3/R2/any
+    # S3-compatible; required for multi-worker or serverless deploys).
+    # S3 credentials come from the standard AWS env vars (AWS_ACCESS_KEY_ID etc.).
+    document_storage: str = "local"
+    document_storage_path: str = "/tmp/kk_documents"
+    s3_bucket: str = ""
+    s3_endpoint_url: str = ""  # set for Cloudflare R2 / MinIO / other S3-compatible
+    s3_region: str = ""
+
     # API
     api_secret_key: str = ""
     allowed_origins: str = "http://localhost:3000"
