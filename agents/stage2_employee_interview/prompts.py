@@ -217,12 +217,11 @@ Risk flag types to check for:
 
 Severity levels: critical, high, medium
 
-Respond with ONLY a JSON array of risk flags found (empty array if none). Each flag must have:
-{{"flag_type": "...", "severity": "...", "description": "...", "recommended_action": "..."}}
+Report every risk flag found with its type, severity, a specific description, and a
+concrete recommended action. Report an empty list if no risk flags are detected.
 
-Example: [{{"flag_type": "single_point_of_failure", "severity": "critical", "description": "Only person who knows the SAP batch scheduling workaround", "recommended_action": "Document the workaround step-by-step before departure"}}]
-
-Return [] if no risk flags detected.
+Example flag: single_point_of_failure / critical / "Only person who knows the SAP batch
+scheduling workaround" / "Document the workaround step-by-step before departure".
 """
 
 SINGLE_QUESTION_REPROMPT = (

@@ -23,11 +23,13 @@ export async function createStage1Session() {
   return res.json()
 }
 
-export async function createStage2Session(stage1SessionId) {
-  if (DEMO_MODE) return mock.createStage2Session(stage1SessionId)
+// The employee link carries a single-use invite token — never the manager's
+// Stage 1 session ID.
+export async function createStage2Session(inviteToken) {
+  if (DEMO_MODE) return mock.createStage2Session(inviteToken)
   const res = await request('/sessions/stage2', {
     method: 'POST',
-    body: JSON.stringify({ stage1_session_id: stage1SessionId }),
+    body: JSON.stringify({ invite_token: inviteToken }),
   })
   return res.json()
 }
@@ -47,34 +49,29 @@ export async function getSessionStatus(sessionId) {
   return res.json()
 }
 
-export async function generateDocument(sessionId, format = 'docx') {
-  if (DEMO_MODE) return mock.generateDocument(sessionId, format)
+// ── Manager-facing (require the manager token) ───────────────────────────────
 
-  // Start generation (returns immediately)
-  const res = await request(`/sessions/${sessionId}/generate`, {
-    method: 'POST',
-    body: JSON.stringify({ format }),
-  })
-  const data = await res.json()
-
-  // Poll until complete
-  const documentId = data.document_id
-  while (true) {
-    await new Promise((resolve) => setTimeout(resolve, 3000))
-    const statusRes = await request(`/documents/${documentId}/status`)
-    const status = await statusRes.json()
-
-    if (status.status === 'complete') {
-      return { document_id: documentId, download_url: status.download_url }
-    }
-    if (status.status === 'failed') {
-      throw new Error(status.error || 'Document generation failed')
-    }
-    // Still generating — keep polling
-  }
+export async function getManagerOverview(stage1SessionId, token) {
+  if (DEMO_MODE) return mock.getManagerOverview(stage1SessionId, token)
+  const res = await request(
+    `/manager/${stage1SessionId}/handover?token=${encodeURIComponent(token)}`
+  )
+  return res.json()
 }
 
-export function getDownloadUrl(documentId) {
-  if (DEMO_MODE) return mock.getDownloadUrl(documentId)
-  return `${BASE}/documents/${documentId}`
+export async function managerGenerateDocument(stage1SessionId, token, format = 'docx') {
+  if (DEMO_MODE) return mock.managerGenerateDocument(stage1SessionId, token, format)
+  const res = await request(
+    `/manager/${stage1SessionId}/generate?token=${encodeURIComponent(token)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ format }),
+    }
+  )
+  return res.json()
+}
+
+export function getDownloadUrl(documentId, token) {
+  if (DEMO_MODE) return mock.getDownloadUrl(documentId, token)
+  return `${BASE}/documents/${documentId}?token=${encodeURIComponent(token)}`
 }

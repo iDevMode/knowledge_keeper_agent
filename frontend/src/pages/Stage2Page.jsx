@@ -6,9 +6,9 @@ import useChat from '../hooks/useChat'
 import { createStage2Session } from '../api/client'
 
 export default function Stage2Page() {
-  const { stage1SessionId } = useParams()
+  const { inviteToken } = useParams()
   const [sessionId, setSessionId] = useState(() => {
-    return sessionStorage.getItem(`stage2_session_${stage1SessionId}`)
+    return sessionStorage.getItem(`stage2_session_${inviteToken}`)
   })
   const [initError, setInitError] = useState(null)
   const [initializing, setInitializing] = useState(!sessionId)
@@ -19,7 +19,6 @@ export default function Stage2Page() {
     loading,
     sessionComplete,
     currentBlock,
-    riskFlagCount,
     error,
     sendMessage,
     addAgentMessage,
@@ -32,9 +31,9 @@ export default function Stage2Page() {
 
     async function init() {
       try {
-        const data = await createStage2Session(stage1SessionId)
+        const data = await createStage2Session(inviteToken)
         setSessionId(data.session_id)
-        sessionStorage.setItem(`stage2_session_${stage1SessionId}`, data.session_id)
+        sessionStorage.setItem(`stage2_session_${inviteToken}`, data.session_id)
         addAgentMessage(data.message)
         setCurrentBlock('role_orientation')
       } catch (err) {
@@ -45,7 +44,7 @@ export default function Stage2Page() {
     }
 
     init()
-  }, [stage1SessionId, sessionId, addAgentMessage, setCurrentBlock])
+  }, [inviteToken, sessionId, addAgentMessage, setCurrentBlock])
 
   // Handle page refresh — session exists in storage but no messages loaded
   useEffect(() => {
@@ -92,7 +91,6 @@ export default function Stage2Page() {
       loading={loading}
       stage={2}
       currentBlock={currentBlock}
-      riskFlagCount={riskFlagCount}
       sessionComplete={sessionComplete}
       title="Stage 2 — Employee Interview"
     >

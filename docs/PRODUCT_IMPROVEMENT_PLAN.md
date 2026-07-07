@@ -152,15 +152,25 @@ Move primary generation to `claude-sonnet-5` (better long-context synthesis for 
 ## Roadmap
 
 ### Phase 0 — Trust & correctness (Week 1) — *do before any real customer session*
-| # | Item | Ref |
-|---|------|-----|
-| 1 | Append follow-up answers instead of overwriting | 1.1 |
-| 2 | Invite tokens; stop exposing stage1 session ID; move doc generation/download to manager side | 1.2 |
-| 3 | Include question text in Stage 3 transcript | 1.6 |
-| 4 | Structured output for both classifiers + failure metric | 1.5 |
-| 5 | Haiku intent classification for profile confirmation | 1.4 |
-| 6 | Remove health-endpoint leaks; enforce API auth | 1.7, 4.2 |
-| 7 | Re-validate single-question retry | 1.7 |
+| # | Item | Ref | Status |
+|---|------|-----|--------|
+| 1 | Append follow-up answers instead of overwriting | 1.1 | ✅ Done |
+| 2 | Invite tokens; stop exposing stage1 session ID; move doc generation/download to manager side | 1.2 | ✅ Done |
+| 3 | Include question text in Stage 3 transcript | 1.6 | ✅ Done |
+| 4 | Structured output for both classifiers + failure metric | 1.5 | ✅ Done |
+| 5 | Haiku intent classification for profile confirmation | 1.4 | ✅ Done |
+| 6 | Remove health-endpoint leaks (API auth: manager endpoints tokenised; full auth in Phase 1) | 1.7, 4.2 | ✅ Done |
+| 7 | Re-validate single-question retry | 1.7 | ✅ Done |
+
+Two additional correctness bugs found and fixed during Phase 0 implementation:
+- **Follow-up limit never enforced:** `process_answer_node` reset `followup_count` on every
+  answer — including answers *to* follow-ups — so `MAX_FOLLOWUPS_PER_QUESTION` could never
+  trigger and the classifier could loop follow-ups indefinitely on one question. The reset
+  now happens only when the interview advances.
+- **Profile review never waited for the manager:** the Stage 1 graph had no interrupt
+  between `profile_review` and the corrections/finalise routing, so the routing evaluated
+  against the manager's last *interview* answer (and `corrections → profile_review` could
+  loop to the recursion limit). A new `await_review_response` interrupt gate fixes the flow.
 
 ### Phase 1 — Durability & delivery (Weeks 2–3)
 Postgres/Redis persistence + checkpointing + stateless rehydration (1.3) · history endpoint & frontend restore · object storage for documents · auto-trigger Stage 3 on Stage 2 completion + email delivery with digest (3.5) · consent screen (2.6) · deletion endpoint & retention TTLs (4.3).

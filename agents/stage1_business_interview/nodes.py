@@ -18,6 +18,7 @@ from agents.stage1_business_interview.state import Stage1State
 from api.session_manager import get_session_store
 from config.constants import MAX_FOLLOWUPS_PER_QUESTION, STAGE1_BLOCKS, STAGE1_BLOCK_QUESTION_COUNTS
 from config.settings import settings
+from models.classifier_outputs import ConfirmationIntent, FollowupDecision
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,34 @@ def validate_single_question(text: str) -> bool:
     Returns True if valid (0 or 1 question marks).
     """
     return text.count("?") <= 1
+
+
+def invoke_with_single_question_retry(llm, messages: list, session_id: str) -> str:
+    """Invoke the LLM, re-prompting once if it asks multiple questions.
+
+    The retry is re-validated too: if it is still invalid, the attempt with
+    fewer question marks is used and a violation is logged for monitoring.
+    """
+    response = llm.invoke(messages)
+    first_text = response.content
+    if validate_single_question(first_text):
+        return first_text
+
+    logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
+    retry_messages = [
+        *messages,
+        AIMessage(content=first_text),
+        HumanMessage(content=SINGLE_QUESTION_REPROMPT),
+    ]
+    retry_text = llm.invoke(retry_messages).content
+    if validate_single_question(retry_text):
+        return retry_text
+
+    logger.error(
+        "session=%s event=single_question_violation both attempts contained multiple questions",
+        session_id,
+    )
+    return min(first_text, retry_text, key=lambda t: t.count("?"))
 
 
 def greeting_node(state: Stage1State) -> Dict[str, Any]:
@@ -88,16 +117,7 @@ def ask_question_node(state: Stage1State) -> Dict[str, Any]:
     ]
 
     llm = _get_primary_llm()
-    response = llm.invoke(messages)
-    response_text = response.content
-
-    # Validate single question — retry once if needed
-    if not validate_single_question(response_text):
-        logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = invoke_with_single_question_retry(llm, messages, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
@@ -108,7 +128,11 @@ def ask_question_node(state: Stage1State) -> Dict[str, Any]:
 
 
 def process_answer_node(state: Stage1State) -> Dict[str, Any]:
-    """Store the user's answer keyed by block.index."""
+    """Append the user's answer to the answer list keyed by block.index.
+
+    Answers are lists because follow-up answers land on the same question key —
+    they must accumulate, not overwrite the original answer.
+    """
     block = state["current_block"]
     index = state["current_question_index"]
     session_id = state.get("session_id", "")
@@ -122,11 +146,14 @@ def process_answer_node(state: Stage1State) -> Dict[str, Any]:
 
     answers = dict(state.get("answers", {}))
     key = f"{block}.{index}"
-    answers[key] = answer_text
+    answers[key] = [*answers.get(key, []), answer_text]
 
+    # NOTE: followup_count is deliberately NOT reset here — this node also
+    # processes answers to follow-up questions, and resetting on every answer
+    # would defeat the MAX_FOLLOWUPS_PER_QUESTION limit. The counter resets
+    # when the interview advances (ask_question / advance_question).
     return {
         "answers": answers,
-        "followup_count": 0,
     }
 
 
@@ -178,22 +205,21 @@ A follow-up is NOT needed when:
 Question asked: {last_ai}
 
 Answer received: {last_human}
-
-Respond with ONLY a JSON object (no markdown, no explanation):
-{{"needs_followup": true/false, "reason": "brief reason", "suggested_followup": "the follow-up question to ask if needed"}}
 """
 
     try:
-        llm = _get_classifier_llm()
-        response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = json.loads(response.content.strip())
+        llm = _get_classifier_llm().with_structured_output(FollowupDecision)
+        result = llm.invoke([HumanMessage(content=classifier_prompt)])
 
-        if result.get("needs_followup", False):
-            return {"pending_followup": result.get("suggested_followup", "")}
+        if result.needs_followup and result.suggested_followup:
+            return {"pending_followup": result.suggested_followup}
         return {"pending_followup": None}
     except Exception as e:
         # Default to no follow-up on classifier failure
-        logger.warning("session=%s Followup classifier failed: %s — defaulting to no followup", session_id, e)
+        logger.error(
+            "session=%s event=classifier_failure classifier=followup error=%s — defaulting to no followup",
+            session_id, e,
+        )
         return {"pending_followup": None}
 
 
@@ -219,14 +245,7 @@ def followup_question_node(state: Stage1State) -> Dict[str, Any]:
     ]
 
     llm = _get_primary_llm()
-    response = llm.invoke(messages)
-    response_text = response.content
-
-    if not validate_single_question(response_text):
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = invoke_with_single_question_retry(llm, messages, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
@@ -389,6 +408,15 @@ def profile_review_node(state: Stage1State) -> Dict[str, Any]:
     }
 
 
+def await_review_response_node(state: Stage1State) -> Dict[str, Any]:
+    """Interrupt gate: pauses the graph so the manager can respond to the review.
+
+    Without this gate the corrections/finalise routing would evaluate against
+    the manager's last *interview* answer instead of their review response.
+    """
+    return {}
+
+
 def corrections_node(state: Stage1State) -> Dict[str, Any]:
     """Apply corrections to the profile based on manager feedback."""
     session_id = state.get("session_id", "")
@@ -482,8 +510,53 @@ def route_after_advance(state: Stage1State) -> str:
     return "ask_question"
 
 
+CONFIRMATION_INTENT_PROMPT = """\
+A manager has just reviewed a generated Role Intelligence Profile and responded.
+Classify their intent:
+
+- "confirm": they approve the profile as-is, with NO changes requested
+- "correct": they request ANY change, addition, or fix — even if they also say it
+  mostly looks good (e.g. "looks good but the title should be Head of Ops" is "correct")
+- "unclear": the intent cannot be determined
+
+Manager's response: {response}
+"""
+
+
+def _confirmation_heuristic(text: str) -> str:
+    """Conservative fallback when the intent classifier is unavailable.
+
+    Only finalises on short, unambiguous confirmations — anything that hints at
+    a change routes to corrections, where the manager can clarify.
+    """
+    normalised = text.strip().lower().rstrip(".!,")
+    confirmation_signals = [
+        "looks good", "looks correct", "that's correct", "that's right",
+        "all good", "perfect", "yes", "confirm", "no changes", "nothing to change",
+        "all correct", "spot on", "no corrections", "approved", "lgtm",
+    ]
+    # NB: avoid substrings of confirmation phrases ("change" is inside "no changes")
+    change_signals = [
+        "but ", "except", "however", "although", "should be",
+        "actually", "instead", "wrong", "incorrect", "missing", "add ",
+    ]
+
+    has_confirmation = any(signal in normalised for signal in confirmation_signals)
+    has_change = any(signal in normalised for signal in change_signals)
+
+    if has_confirmation and not has_change and len(normalised) <= 60:
+        return "finalise"
+    return "corrections"
+
+
 def route_after_profile_review(state: Stage1State) -> str:
-    """Route to corrections or finalise based on user response."""
+    """Route to corrections or finalise based on the manager's review response.
+
+    Uses a Haiku intent classifier — keyword matching mis-finalises on responses
+    like "no changes needed except the job title". Falls back to a conservative
+    heuristic if the classifier call fails.
+    """
+    session_id = state.get("session_id", "")
     history = state["conversation_history"]
     last_human = None
     for msg in reversed(history):
@@ -494,16 +567,17 @@ def route_after_profile_review(state: Stage1State) -> str:
     if last_human is None:
         return "finalise"
 
-    # Simple heuristic: if the response looks like a confirmation, finalise
-    confirmation_signals = [
-        "looks good", "looks correct", "that's correct", "that's right",
-        "all good", "perfect", "yes", "confirm", "no changes", "nothing to change",
-        "all correct", "spot on", "no corrections", "approved", "lgtm",
-    ]
-    normalised = last_human.strip().lower().rstrip(".!,")
-
-    for signal in confirmation_signals:
-        if signal in normalised:
+    try:
+        llm = _get_classifier_llm().with_structured_output(ConfirmationIntent)
+        result = llm.invoke([HumanMessage(content=CONFIRMATION_INTENT_PROMPT.format(response=last_human))])
+        if result.intent == "confirm":
             return "finalise"
-
-    return "corrections"
+        # "correct" and "unclear" both go to corrections — the corrections node
+        # asks the manager to clarify if it can't apply the change
+        return "corrections"
+    except Exception as e:
+        logger.error(
+            "session=%s event=classifier_failure classifier=confirmation_intent error=%s — using heuristic",
+            session_id, e,
+        )
+        return _confirmation_heuristic(last_human)

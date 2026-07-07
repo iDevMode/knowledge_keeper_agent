@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Dict, List, Optional
 
 from langchain_core.messages import BaseMessage
 from typing_extensions import TypedDict
@@ -12,7 +12,7 @@ class Stage1State(TypedDict):
     business_name: str
     current_block: str
     current_question_index: int
-    answers: Dict[str, Any]
+    answers: Dict[str, List[str]]  # "{block}.{index}" -> [answer, followup answers...]
     conversation_history: Annotated[List[BaseMessage], operator.add]
     role_intelligence_profile: Optional[RoleIntelligenceProfile]
     profile_confirmed: bool

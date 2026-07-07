@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Dict, List, Optional
 
 from langchain_core.messages import BaseMessage
 from typing_extensions import TypedDict
@@ -20,7 +20,7 @@ class Stage2State(TypedDict):
     block_depths: Dict[str, str]  # block name -> "full" or "light"
     followup_count: int
     pending_followup: Optional[str]
-    answers: Dict[str, Any]  # keyed by "{block}.{index}"
+    answers: Dict[str, List[str]]  # "{block}.{index}" -> [answer, followup answers...]
     conversation_history: Annotated[List[BaseMessage], operator.add]
     risk_flags: List[RiskFlag]
     last_agent_message: str

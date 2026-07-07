@@ -15,7 +15,17 @@ from agents.stage1_business_interview.nodes import (
     validate_single_question,
 )
 from config.constants import STAGE1_BLOCKS, STAGE1_BLOCK_QUESTION_COUNTS
+from models.classifier_outputs import ConfirmationIntent, FollowupDecision
 from models.role_intelligence_profile import RoleIntelligenceProfile
+
+
+def _make_structured_classifier(result):
+    """Mock classifier LLM whose with_structured_output(...).invoke returns `result`."""
+    mock_llm = MagicMock()
+    structured = MagicMock()
+    structured.invoke.return_value = result
+    mock_llm.with_structured_output.return_value = structured
+    return mock_llm
 
 
 # ---- Helpers ----
@@ -114,7 +124,7 @@ class TestGreetingNode:
 # ---- TestProcessAnswerNode ----
 
 class TestProcessAnswerNode:
-    def test_stores_answer(self):
+    def test_stores_answer_as_list(self):
         state = _make_state(
             current_block="business_context",
             current_question_index=1,
@@ -124,9 +134,28 @@ class TestProcessAnswerNode:
             ],
         )
         result = process_answer_node(state)
-        assert result["answers"]["business_context.1"] == "We have 3 teams of 5 people each."
+        assert result["answers"]["business_context.1"] == ["We have 3 teams of 5 people each."]
 
-    def test_resets_followup_count(self):
+    def test_followup_answer_appends_not_overwrites(self):
+        """Follow-up answers land on the same key — they must accumulate."""
+        state = _make_state(
+            current_block="business_context",
+            current_question_index=1,
+            answers={"business_context.1": ["We have 3 teams."]},
+            conversation_history=[
+                AIMessage(content="Could you say more about how those teams divide the work?"),
+                HumanMessage(content="One team per product line, plus a shared platform team."),
+            ],
+        )
+        result = process_answer_node(state)
+        assert result["answers"]["business_context.1"] == [
+            "We have 3 teams.",
+            "One team per product line, plus a shared platform team.",
+        ]
+
+    def test_does_not_reset_followup_count(self):
+        """Resetting here would defeat the MAX_FOLLOWUPS limit — this node also
+        processes follow-up answers."""
         state = _make_state(
             current_block="vacant_role",
             current_question_index=0,
@@ -134,7 +163,7 @@ class TestProcessAnswerNode:
             conversation_history=[HumanMessage(content="Software Engineer in Product team")],
         )
         result = process_answer_node(state)
-        assert result["followup_count"] == 0
+        assert "followup_count" not in result
 
 
 # ---- TestRouting ----
@@ -160,15 +189,54 @@ class TestRouting:
         state = _make_state(current_block="vacant_role")
         assert route_after_advance(state) == "ask_question"
 
-    def test_route_to_finalise_on_confirmation(self):
+    @patch("agents.stage1_business_interview.nodes._get_classifier_llm")
+    def test_route_to_finalise_on_confirmation(self, mock_get_llm):
+        mock_get_llm.return_value = _make_structured_classifier(ConfirmationIntent(intent="confirm"))
         state = _make_state(
             conversation_history=[HumanMessage(content="Looks good, no changes needed.")]
         )
         assert route_after_profile_review(state) == "finalise"
 
-    def test_route_to_corrections_on_feedback(self):
+    @patch("agents.stage1_business_interview.nodes._get_classifier_llm")
+    def test_route_to_corrections_on_feedback(self, mock_get_llm):
+        mock_get_llm.return_value = _make_structured_classifier(ConfirmationIntent(intent="correct"))
         state = _make_state(
             conversation_history=[HumanMessage(content="The job title should be Senior Manager, not Manager.")]
+        )
+        assert route_after_profile_review(state) == "corrections"
+
+    @patch("agents.stage1_business_interview.nodes._get_classifier_llm")
+    def test_route_to_corrections_on_mixed_confirmation(self, mock_get_llm):
+        """'no changes except X' must route to corrections — the old keyword
+        heuristic mis-finalised on this."""
+        mock_get_llm.return_value = _make_structured_classifier(ConfirmationIntent(intent="correct"))
+        state = _make_state(
+            conversation_history=[
+                HumanMessage(content="No changes needed except the job title — it's Head of Ops.")
+            ]
+        )
+        assert route_after_profile_review(state) == "corrections"
+
+    @patch("agents.stage1_business_interview.nodes._get_classifier_llm")
+    def test_heuristic_fallback_confirms_short_approval(self, mock_get_llm):
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output.return_value.invoke.side_effect = Exception("API error")
+        mock_get_llm.return_value = mock_llm
+        state = _make_state(
+            conversation_history=[HumanMessage(content="Looks good, no changes.")]
+        )
+        assert route_after_profile_review(state) == "finalise"
+
+    @patch("agents.stage1_business_interview.nodes._get_classifier_llm")
+    def test_heuristic_fallback_is_conservative(self, mock_get_llm):
+        """On classifier failure, anything hinting at a change goes to corrections."""
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output.return_value.invoke.side_effect = Exception("API error")
+        mock_get_llm.return_value = mock_llm
+        state = _make_state(
+            conversation_history=[
+                HumanMessage(content="No changes needed except the job title — it's Head of Ops.")
+            ]
         )
         assert route_after_profile_review(state) == "corrections"
 
@@ -277,6 +345,33 @@ class TestAskQuestionNode:
         assert result["last_agent_message"] == "How is the team structured?"
         assert mock_llm.invoke.call_count == 2
 
+    @patch("agents.stage1_business_interview.nodes._get_primary_llm")
+    def test_retry_is_revalidated_and_better_attempt_used(self, mock_get_llm):
+        """If the retry still contains multiple questions, use the attempt with
+        fewer question marks instead of shipping the invalid retry."""
+        from agents.stage1_business_interview.nodes import ask_question_node
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [
+            MagicMock(content="What do you do? Who leads? Where are you based?"),
+            MagicMock(content="What do you do? And who leads the team?"),
+        ]
+        mock_get_llm.return_value = mock_llm
+
+        state = _make_state(
+            current_block="business_context",
+            current_question_index=1,
+            conversation_history=[
+                AIMessage(content="Welcome..."),
+                HumanMessage(content="We're in fintech."),
+            ],
+        )
+
+        result = ask_question_node(state)
+        # Second attempt has 2 question marks vs 3 — it wins
+        assert result["last_agent_message"] == "What do you do? And who leads the team?"
+        assert mock_llm.invoke.call_count == 2
+
 
 # ---- TestFollowupClassifierNode (mocked LLM) ----
 
@@ -285,11 +380,9 @@ class TestFollowupClassifierNode:
     def test_followup_needed(self, mock_get_llm):
         from agents.stage1_business_interview.nodes import followup_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='{"needs_followup": true, "reason": "vague", "suggested_followup": "Can you elaborate?"}'
+        mock_get_llm.return_value = _make_structured_classifier(
+            FollowupDecision(needs_followup=True, reason="vague", suggested_followup="Can you elaborate?")
         )
-        mock_get_llm.return_value = mock_llm
 
         state = _make_state(
             conversation_history=[
@@ -304,11 +397,9 @@ class TestFollowupClassifierNode:
     def test_no_followup_needed(self, mock_get_llm):
         from agents.stage1_business_interview.nodes import followup_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='{"needs_followup": false, "reason": "clear answer", "suggested_followup": ""}'
+        mock_get_llm.return_value = _make_structured_classifier(
+            FollowupDecision(needs_followup=False, reason="clear answer", suggested_followup="")
         )
-        mock_get_llm.return_value = mock_llm
 
         state = _make_state(
             conversation_history=[
@@ -324,7 +415,7 @@ class TestFollowupClassifierNode:
         from agents.stage1_business_interview.nodes import followup_classifier_node
 
         mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("API error")
+        mock_llm.with_structured_output.return_value.invoke.side_effect = Exception("API error")
         mock_get_llm.return_value = mock_llm
 
         state = _make_state(

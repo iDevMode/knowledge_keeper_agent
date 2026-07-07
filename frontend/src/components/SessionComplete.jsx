@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { generateDocument } from '../api/client'
+import { Link } from 'react-router-dom'
 
 function CheckmarkIcon() {
   return (
@@ -17,9 +17,16 @@ function CheckmarkIcon() {
   )
 }
 
-function Stage1Complete({ sessionId, profile }) {
+function Stage1Complete({ sessionId, profile, inviteToken, managerToken }) {
   const [copied, setCopied] = useState(false)
-  const stage2Link = `${window.location.origin}/stage2/${sessionId}`
+
+  // The employee link carries a single-use invite token — the Stage 1 session
+  // ID must never appear in it. The manager token is kept in this browser so
+  // the manager can return to their dashboard to collect the handover.
+  const stage2Link = inviteToken ? `${window.location.origin}/stage2/i/${inviteToken}` : null
+  if (managerToken) {
+    localStorage.setItem(`kk_manager_token_${sessionId}`, managerToken)
+  }
 
   function copyLink() {
     navigator.clipboard.writeText(stage2Link).then(() => {
@@ -50,108 +57,74 @@ function Stage1Complete({ sessionId, profile }) {
         </div>
       )}
 
-      {/* Copy link */}
-      <div className="flex items-center gap-2">
-        <input
-          type="text"
-          value={stage2Link}
-          readOnly
-          className="flex-1 px-3 py-2.5 rounded-lg border border-parchment-300 bg-white text-sm text-ink truncate"
-        />
-        <button
-          onClick={copyLink}
-          className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-keeper-500 text-white text-sm font-medium hover:bg-keeper-400 transition-colors"
+      {/* Copy employee link */}
+      {stage2Link && (
+        <div className="flex items-center gap-2 mb-6">
+          <input
+            type="text"
+            value={stage2Link}
+            readOnly
+            className="flex-1 px-3 py-2.5 rounded-lg border border-parchment-300 bg-white text-sm text-ink truncate"
+          />
+          <button
+            onClick={copyLink}
+            className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-keeper-500 text-white text-sm font-medium hover:bg-keeper-400 transition-colors"
+          >
+            {copied ? 'Copied!' : 'Copy Link'}
+          </button>
+        </div>
+      )}
+
+      {/* Manager dashboard link */}
+      <div className="bg-parchment-50 border border-parchment-200 rounded-xl p-4 text-sm">
+        <p className="text-parchment-500 mb-2">
+          Once the employee finishes their interview, the handover document will be
+          compiled automatically. Track progress and download it from your dashboard:
+        </p>
+        <Link
+          to={`/manager/${sessionId}`}
+          className="inline-block px-4 py-2 rounded-lg border border-keeper-500 text-keeper-500 text-sm font-medium hover:bg-keeper-500 hover:text-white transition-colors"
         >
-          {copied ? 'Copied!' : 'Copy Link'}
-        </button>
+          Open Manager Dashboard
+        </Link>
+        <p className="text-xs text-parchment-400 mt-2">
+          Bookmark this page — the dashboard is tied to this browser.
+        </p>
       </div>
     </div>
   )
 }
 
-function Stage2Complete({ sessionId }) {
-  const [format, setFormat] = useState('docx')
-  const [generating, setGenerating] = useState(false)
-  const [downloadUrl, setDownloadUrl] = useState(null)
-  const [error, setError] = useState(null)
-
-  async function handleGenerate() {
-    setGenerating(true)
-    setError(null)
-    try {
-      const data = await generateDocument(sessionId, format)
-      setDownloadUrl(data.download_url)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setGenerating(false)
-    }
-  }
-
+function Stage2Complete() {
   return (
     <div className="p-6 animate-page-in">
       <CheckmarkIcon />
       <h2 className="font-display text-xl text-ink-heading text-center mb-2">
         Interview Complete
       </h2>
-      <p className="text-sm text-parchment-500 text-center mb-6">
-        Thank you for sharing your knowledge. Generate your handover document below.
+      <p className="text-sm text-parchment-500 text-center">
+        Thank you for sharing your knowledge — it will make a real difference to
+        whoever steps into your role next.
       </p>
-
-      {!downloadUrl ? (
-        <div className="space-y-4">
-          {/* Format picker */}
-          <div className="flex gap-3 justify-center">
-            {['docx', 'pdf'].map((f) => (
-              <button
-                key={f}
-                onClick={() => setFormat(f)}
-                className={`px-5 py-2.5 rounded-lg text-sm font-medium border transition-colors ${
-                  format === f
-                    ? 'border-keeper-500 bg-keeper-500 text-white'
-                    : 'border-parchment-300 bg-white text-ink hover:border-keeper-400'
-                }`}
-              >
-                {f.toUpperCase()}
-              </button>
-            ))}
-          </div>
-
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="w-full py-3 rounded-xl bg-keeper-500 text-white font-medium hover:bg-keeper-400 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-          >
-            {generating ? (
-              <>
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Generating document...
-              </>
-            ) : (
-              'Generate Document'
-            )}
-          </button>
-        </div>
-      ) : (
-        <a
-          href={downloadUrl}
-          download={`KnowledgeKeeper-Handover.${format === 'pdf' ? 'pdf' : 'docx'}`}
-          className="block w-full py-3 rounded-xl bg-keeper-500 text-white font-medium text-center hover:bg-keeper-400 transition-colors"
-        >
-          Download {format.toUpperCase()}
-        </a>
-      )}
-
-      {error && (
-        <p className="mt-3 text-sm text-red-600 text-center">{error}</p>
-      )}
+      <p className="text-sm text-parchment-500 text-center mt-3">
+        Your answers are now being compiled into a handover document, which will be
+        shared with the designated recipients. There's nothing else you need to do —
+        you can close this window.
+      </p>
     </div>
   )
 }
 
-export default function SessionComplete({ stage, sessionId, profile }) {
+export default function SessionComplete({ stage, sessionId, profile, inviteToken, managerToken }) {
   if (stage === 1) {
-    return <Stage1Complete sessionId={sessionId} profile={profile} />
+    return (
+      <Stage1Complete
+        sessionId={sessionId}
+        profile={profile}
+        inviteToken={inviteToken}
+        managerToken={managerToken}
+      />
+    )
   }
-  return <Stage2Complete sessionId={sessionId} />
+  return <Stage2Complete />
 }

@@ -1,7 +1,12 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from agents.stage2_employee_interview.prompts import (
+    BLOCK_QUESTIONS as STAGE2_BLOCK_QUESTIONS,
+    CLOSING_QUESTIONS,
+    ROLE_ORIENTATION_QUESTIONS,
+)
 from models.risk_flags import RiskFlag
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -72,7 +77,7 @@ def build_context_block(
     profile: RoleIntelligenceProfile,
     conversation_history: List[BaseMessage],
     risk_flags: List[RiskFlag],
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     block_order: List[str],
     block_depths: Dict[str, str],
 ) -> str:
@@ -188,44 +193,72 @@ def _format_risk_flags(risk_flags: List[RiskFlag]) -> str:
     return "\n".join(lines)
 
 
+def _question_instruction(block: str, index: int) -> Optional[str]:
+    """Look up the question instruction that produced a given answer key."""
+    if block == "role_orientation":
+        questions = ROLE_ORIENTATION_QUESTIONS
+    elif block == "closing_sequence":
+        questions = CLOSING_QUESTIONS
+    else:
+        questions = STAGE2_BLOCK_QUESTIONS.get(block, [])
+    if 0 <= index < len(questions):
+        return questions[index]
+    return None
+
+
+def _format_answer_entries(block: str, key: str, value: Union[str, List[str]]) -> List[str]:
+    """Format one question's answers, including the question that was asked.
+
+    The question text is essential context — without it the synthesis model
+    only sees 'Q3: <answer>' and has to guess what was asked. Answers are lists
+    (original answer plus follow-up answers); plain strings are accepted for
+    backward compatibility with older fixtures.
+    """
+    index = int(key.split(".")[1])
+    lines = []
+
+    question = _question_instruction(block, index)
+    if question:
+        lines.append(f"Q{index} (question asked): {question}")
+    else:
+        lines.append(f"Q{index}:")
+
+    answer_list = value if isinstance(value, list) else [value]
+    for i, answer in enumerate(answer_list):
+        label = "A" if i == 0 else "A (follow-up)"
+        lines.append(f"{label}: {answer}")
+
+    return lines
+
+
 def _format_answers_by_block(
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     block_order: List[str],
     block_depths: Dict[str, str],
 ) -> str:
-    """Group answers by block in priority order."""
+    """Group answers by block in priority order, as question/answer pairs."""
     lines = []
 
-    # Role orientation first
-    orientation_answers = {k: v for k, v in answers.items() if k.startswith("role_orientation.")}
-    if orientation_answers:
-        lines.append("### Role Orientation")
-        for key in sorted(orientation_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {orientation_answers[key]}")
+    def _append_block(block: str, heading: str) -> None:
+        block_answers = {k: v for k, v in answers.items() if k.startswith(f"{block}.")}
+        if not block_answers:
+            return
+        lines.append(heading)
+        for key in sorted(block_answers.keys(), key=lambda k: int(k.split(".")[1])):
+            lines.extend(_format_answer_entries(block, key, block_answers[key]))
         lines.append("")
+
+    # Role orientation first
+    _append_block("role_orientation", "### Role Orientation")
 
     # Knowledge blocks in priority order
     for block in block_order:
-        block_answers = {k: v for k, v in answers.items() if k.startswith(f"{block}.")}
-        if not block_answers:
-            continue
         depth = block_depths.get(block, "full")
         label = block.replace("_", " ").title()
-        lines.append(f"### {label} [{depth} depth]")
-        for key in sorted(block_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {block_answers[key]}")
-        lines.append("")
+        _append_block(block, f"### {label} [{depth} depth]")
 
     # Closing sequence
-    closing_answers = {k: v for k, v in answers.items() if k.startswith("closing_sequence.")}
-    if closing_answers:
-        lines.append("### Closing Questions")
-        for key in sorted(closing_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {closing_answers[key]}")
-        lines.append("")
+    _append_block("closing_sequence", "### Closing Questions")
 
     return "\n".join(lines)
 
@@ -250,7 +283,7 @@ def _format_conversation_excerpts(conversation_history: List[BaseMessage]) -> st
 
 def _build_generation_instruction(
     profile: RoleIntelligenceProfile,
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     risk_flags: List[RiskFlag],
 ) -> str:
     """Build the generation instruction with profile-specific values."""

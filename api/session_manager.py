@@ -1,3 +1,4 @@
+import secrets
 import time
 import uuid
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
@@ -15,6 +16,11 @@ class SessionStore(Protocol):
     def get_linked_session(self, session_id: str) -> Optional[str]: ...
     def store_profile(self, session_id: str, profile: RoleIntelligenceProfile) -> None: ...
     def get_profile(self, session_id: str) -> Optional[RoleIntelligenceProfile]: ...
+    def create_invite_token(self, stage1_id: str) -> str: ...
+    def resolve_invite_token(self, token: str) -> Optional[str]: ...
+    def consume_invite_token(self, token: str) -> None: ...
+    def create_manager_token(self, stage1_id: str) -> str: ...
+    def validate_manager_token(self, stage1_id: str, token: str) -> bool: ...
 
 
 class InMemorySessionStore:
@@ -22,6 +28,12 @@ class InMemorySessionStore:
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._links: Dict[str, str] = {}  # stage1_id <-> stage2_id (bidirectional)
         self._profiles: Dict[str, dict] = {}  # session_id -> profile dict
+        # Employee invite tokens: the Stage 2 share link must never expose the
+        # Stage 1 session ID (it would let the employee access the manager's
+        # confidential session). token -> {stage1_id, used}
+        self._invite_tokens: Dict[str, Dict[str, Any]] = {}
+        # Manager tokens gate document generation/download. stage1_id -> token
+        self._manager_tokens: Dict[str, str] = {}
         self._ttl_seconds = (ttl_hours or settings.session_ttl_hours) * 3600
 
     def _is_expired(self, session_id: str) -> bool:
@@ -66,6 +78,42 @@ class InMemorySessionStore:
         if data is None:
             return None
         return RoleIntelligenceProfile.model_validate(data)
+
+    # ---- Tokens ----
+
+    def create_invite_token(self, stage1_id: str) -> str:
+        """Create a single-use employee invite token for a Stage 1 session."""
+        token = secrets.token_urlsafe(32)
+        self._invite_tokens[token] = {"stage1_id": stage1_id, "used": False}
+        return token
+
+    def resolve_invite_token(self, token: str) -> Optional[str]:
+        """Return the Stage 1 session ID for an unused, unexpired invite token."""
+        entry = self._invite_tokens.get(token)
+        if entry is None or entry["used"]:
+            return None
+        if self._is_expired(entry["stage1_id"]):
+            return None
+        return entry["stage1_id"]
+
+    def is_invite_token_used(self, token: str) -> bool:
+        entry = self._invite_tokens.get(token)
+        return bool(entry and entry["used"])
+
+    def consume_invite_token(self, token: str) -> None:
+        entry = self._invite_tokens.get(token)
+        if entry:
+            entry["used"] = True
+
+    def create_manager_token(self, stage1_id: str) -> str:
+        """Create (or return the existing) manager token for a Stage 1 session."""
+        if stage1_id not in self._manager_tokens:
+            self._manager_tokens[stage1_id] = secrets.token_urlsafe(32)
+        return self._manager_tokens[stage1_id]
+
+    def validate_manager_token(self, stage1_id: str, token: str) -> bool:
+        expected = self._manager_tokens.get(stage1_id)
+        return bool(expected and token and secrets.compare_digest(expected, token))
 
 
 _store: InMemorySessionStore | None = None

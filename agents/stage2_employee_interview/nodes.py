@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import Any, Dict
 
@@ -26,6 +25,7 @@ from config.constants import (
     KnowledgeBlock,
 )
 from config.settings import settings
+from models.classifier_outputs import FollowupDecision, RiskFlagBatch
 from models.knowledge_blocks import determine_block_order_and_depth
 from models.risk_flags import RiskFlag
 
@@ -51,6 +51,34 @@ def _get_classifier_llm() -> ChatAnthropic:
 def validate_single_question(text: str) -> bool:
     """Check that the text contains at most one question mark."""
     return text.count("?") <= 1
+
+
+def invoke_with_single_question_retry(llm, messages: list, session_id: str) -> str:
+    """Invoke the LLM, re-prompting once if it asks multiple questions.
+
+    The retry is re-validated too: if it is still invalid, the attempt with
+    fewer question marks is used and a violation is logged for monitoring.
+    """
+    response = llm.invoke(messages)
+    first_text = response.content
+    if validate_single_question(first_text):
+        return first_text
+
+    logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
+    retry_messages = [
+        *messages,
+        AIMessage(content=first_text),
+        HumanMessage(content=SINGLE_QUESTION_REPROMPT),
+    ]
+    retry_text = llm.invoke(retry_messages).content
+    if validate_single_question(retry_text):
+        return retry_text
+
+    logger.error(
+        "session=%s event=single_question_violation both attempts contained multiple questions",
+        session_id,
+    )
+    return min(first_text, retry_text, key=lambda t: t.count("?"))
 
 
 def load_profile_node(state: Stage2State) -> Dict[str, Any]:
@@ -145,15 +173,7 @@ def ask_question_node(state: Stage2State) -> Dict[str, Any]:
     ]
 
     llm = _get_primary_llm()
-    response = llm.invoke(messages)
-    response_text = response.content
-
-    if not validate_single_question(response_text):
-        logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = invoke_with_single_question_retry(llm, messages, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
@@ -164,7 +184,11 @@ def ask_question_node(state: Stage2State) -> Dict[str, Any]:
 
 
 def process_answer_node(state: Stage2State) -> Dict[str, Any]:
-    """Store the user's answer keyed by block.index."""
+    """Append the user's answer to the answer list keyed by block.index.
+
+    Answers are lists because follow-up answers land on the same question key —
+    they must accumulate, not overwrite the original answer.
+    """
     block = state["current_block"]
     index = state["current_question_index"]
     session_id = state.get("session_id", "")
@@ -177,11 +201,14 @@ def process_answer_node(state: Stage2State) -> Dict[str, Any]:
 
     answers = dict(state.get("answers", {}))
     key = f"{block}.{index}"
-    answers[key] = answer_text
+    answers[key] = [*answers.get(key, []), answer_text]
 
+    # NOTE: followup_count is deliberately NOT reset here — this node also
+    # processes answers to follow-up questions, and resetting on every answer
+    # would defeat the MAX_FOLLOWUPS_PER_QUESTION limit. The counter resets
+    # when the interview advances (ask_question / advance_question).
     return {
         "answers": answers,
-        "followup_count": 0,
     }
 
 
@@ -215,21 +242,16 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
     )
 
     try:
-        llm = _get_classifier_llm()
-        response = llm.invoke([HumanMessage(content=prompt)])
-        raw = response.content.strip()
-
-        flags_data = json.loads(raw)
-        if not isinstance(flags_data, list):
-            flags_data = []
+        llm = _get_classifier_llm().with_structured_output(RiskFlagBatch)
+        result = llm.invoke([HumanMessage(content=prompt)])
 
         new_flags = []
-        for flag_data in flags_data:
+        for detected in result.flags:
             flag = RiskFlag(
-                flag_type=flag_data["flag_type"],
-                severity=flag_data["severity"],
-                description=flag_data["description"],
-                recommended_action=flag_data["recommended_action"],
+                flag_type=detected.flag_type,
+                severity=detected.severity,
+                description=detected.description,
+                recommended_action=detected.recommended_action,
                 source_block=block,
                 source_question_index=index,
             )
@@ -243,7 +265,10 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
         return {"risk_flags": existing_flags + new_flags}
 
     except Exception as e:
-        logger.warning("session=%s Risk flag classifier failed: %s — returning unchanged", session_id, e)
+        logger.error(
+            "session=%s event=classifier_failure classifier=risk_flag error=%s — returning unchanged",
+            session_id, e,
+        )
         return {}
 
 
@@ -293,21 +318,20 @@ A follow-up is NOT needed when:
 Question asked: {last_ai}
 
 Answer received: {last_human}
-
-Respond with ONLY a JSON object (no markdown, no explanation):
-{{"needs_followup": true/false, "reason": "brief reason", "suggested_followup": "the follow-up question to ask if needed"}}
 """
 
     try:
-        llm = _get_classifier_llm()
-        response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = json.loads(response.content.strip())
+        llm = _get_classifier_llm().with_structured_output(FollowupDecision)
+        result = llm.invoke([HumanMessage(content=classifier_prompt)])
 
-        if result.get("needs_followup", False):
-            return {"pending_followup": result.get("suggested_followup", "")}
+        if result.needs_followup and result.suggested_followup:
+            return {"pending_followup": result.suggested_followup}
         return {"pending_followup": None}
     except Exception as e:
-        logger.warning("session=%s Followup classifier failed: %s — defaulting to no followup", session_id, e)
+        logger.error(
+            "session=%s event=classifier_failure classifier=followup error=%s — defaulting to no followup",
+            session_id, e,
+        )
         return {"pending_followup": None}
 
 
@@ -334,14 +358,7 @@ def followup_question_node(state: Stage2State) -> Dict[str, Any]:
     ]
 
     llm = _get_primary_llm()
-    response = llm.invoke(messages)
-    response_text = response.content
-
-    if not validate_single_question(response_text):
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = invoke_with_single_question_retry(llm, messages, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],

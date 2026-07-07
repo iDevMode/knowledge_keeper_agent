@@ -14,6 +14,8 @@ export default function Stage1Page() {
     loading,
     sessionComplete,
     profile,
+    inviteToken,
+    managerToken,
     currentBlock,
     error,
     sendMessage,
@@ -47,6 +49,8 @@ export default function Stage1Page() {
           stage={1}
           sessionId={sessionId}
           profile={profile}
+          inviteToken={inviteToken}
+          managerToken={managerToken}
         />
       )}
       {error && (

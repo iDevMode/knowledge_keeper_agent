@@ -22,8 +22,18 @@ from config.constants import (
     STAGE2_CLOSING_QUESTION_COUNT,
     STAGE2_ROLE_ORIENTATION_QUESTION_COUNT,
 )
+from models.classifier_outputs import DetectedRiskFlag, FollowupDecision, RiskFlagBatch
 from models.knowledge_blocks import determine_block_order_and_depth
 from models.role_intelligence_profile import RoleIntelligenceProfile
+
+
+def _make_structured_classifier(result):
+    """Mock classifier LLM whose with_structured_output(...).invoke returns `result`."""
+    mock_llm = MagicMock()
+    structured = MagicMock()
+    structured.invoke.return_value = result
+    mock_llm.with_structured_output.return_value = structured
+    return mock_llm
 
 
 # ---- Helpers ----
@@ -245,13 +255,14 @@ class TestRiskFlagClassifierNode:
     def test_detects_flag(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='[{"flag_type": "single_point_of_failure", "severity": "critical", '
-                    '"description": "Only person who knows SAP workflow", '
-                    '"recommended_action": "Document before departure"}]'
-        )
-        mock_get_llm.return_value = mock_llm
+        mock_get_llm.return_value = _make_structured_classifier(RiskFlagBatch(flags=[
+            DetectedRiskFlag(
+                flag_type="single_point_of_failure",
+                severity="critical",
+                description="Only person who knows SAP workflow",
+                recommended_action="Document before departure",
+            ),
+        ]))
 
         state = _make_state(
             current_block="internal_processes_workflows",
@@ -270,9 +281,7 @@ class TestRiskFlagClassifierNode:
     def test_no_flags_returns_empty(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="[]")
-        mock_get_llm.return_value = mock_llm
+        mock_get_llm.return_value = _make_structured_classifier(RiskFlagBatch(flags=[]))
 
         state = _make_state(
             current_block="role_orientation",
@@ -290,7 +299,7 @@ class TestRiskFlagClassifierNode:
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
         mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("API error")
+        mock_llm.with_structured_output.return_value.invoke.side_effect = Exception("API error")
         mock_get_llm.return_value = mock_llm
 
         state = _make_state(
@@ -309,16 +318,20 @@ class TestRiskFlagClassifierNode:
     def test_multiple_flags(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import risk_flag_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='['
-                    '{"flag_type": "single_point_of_failure", "severity": "critical", '
-                    '"description": "Only admin for SAP", "recommended_action": "Transfer admin access"},'
-                    '{"flag_type": "access_credential_gap", "severity": "high", '
-                    '"description": "Holds sole Power BI credentials", "recommended_action": "Share credentials"}'
-                    ']'
-        )
-        mock_get_llm.return_value = mock_llm
+        mock_get_llm.return_value = _make_structured_classifier(RiskFlagBatch(flags=[
+            DetectedRiskFlag(
+                flag_type="single_point_of_failure",
+                severity="critical",
+                description="Only admin for SAP",
+                recommended_action="Transfer admin access",
+            ),
+            DetectedRiskFlag(
+                flag_type="access_credential_gap",
+                severity="high",
+                description="Holds sole Power BI credentials",
+                recommended_action="Share credentials",
+            ),
+        ]))
 
         state = _make_state(
             current_block="technical_systems_tools",
@@ -427,11 +440,9 @@ class TestFollowupClassifierNode:
     def test_followup_needed(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import followup_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='{"needs_followup": true, "reason": "vague", "suggested_followup": "Can you be more specific?"}'
+        mock_get_llm.return_value = _make_structured_classifier(
+            FollowupDecision(needs_followup=True, reason="vague", suggested_followup="Can you be more specific?")
         )
-        mock_get_llm.return_value = mock_llm
 
         state = _make_state(
             conversation_history=[
@@ -446,11 +457,9 @@ class TestFollowupClassifierNode:
     def test_no_followup(self, mock_get_llm):
         from agents.stage2_employee_interview.nodes import followup_classifier_node
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content='{"needs_followup": false, "reason": "clear answer", "suggested_followup": ""}'
+        mock_get_llm.return_value = _make_structured_classifier(
+            FollowupDecision(needs_followup=False, reason="clear answer", suggested_followup="")
         )
-        mock_get_llm.return_value = mock_llm
 
         state = _make_state(
             conversation_history=[
@@ -466,7 +475,7 @@ class TestFollowupClassifierNode:
         from agents.stage2_employee_interview.nodes import followup_classifier_node
 
         mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("API error")
+        mock_llm.with_structured_output.return_value.invoke.side_effect = Exception("API error")
         mock_get_llm.return_value = mock_llm
 
         state = _make_state(
@@ -556,7 +565,7 @@ class TestGreetingNode:
 # ---- TestProcessAnswerNode ----
 
 class TestProcessAnswerNode:
-    def test_stores_answer(self):
+    def test_stores_answer_as_list(self):
         state = _make_state(
             current_block="internal_processes_workflows",
             current_question_index=1,
@@ -566,9 +575,28 @@ class TestProcessAnswerNode:
             ],
         )
         result = process_answer_node(state)
-        assert result["answers"]["internal_processes_workflows.1"] == "An email from the production manager."
+        assert result["answers"]["internal_processes_workflows.1"] == ["An email from the production manager."]
 
-    def test_resets_followup_count(self):
+    def test_followup_answer_appends_not_overwrites(self):
+        """Follow-up answers land on the same key — they must accumulate."""
+        state = _make_state(
+            current_block="internal_processes_workflows",
+            current_question_index=1,
+            answers={"internal_processes_workflows.1": ["An email from the production manager."]},
+            conversation_history=[
+                AIMessage(content="What happens if that email never arrives?"),
+                HumanMessage(content="I chase the manager directly — there's no formal fallback."),
+            ],
+        )
+        result = process_answer_node(state)
+        assert result["answers"]["internal_processes_workflows.1"] == [
+            "An email from the production manager.",
+            "I chase the manager directly — there's no formal fallback.",
+        ]
+
+    def test_does_not_reset_followup_count(self):
+        """Resetting here would defeat the MAX_FOLLOWUPS limit — this node also
+        processes follow-up answers."""
         state = _make_state(
             current_block="role_orientation",
             current_question_index=0,
@@ -576,4 +604,4 @@ class TestProcessAnswerNode:
             conversation_history=[HumanMessage(content="I coordinate production.")],
         )
         result = process_answer_node(state)
-        assert result["followup_count"] == 0
+        assert "followup_count" not in result

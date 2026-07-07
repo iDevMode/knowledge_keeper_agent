@@ -169,9 +169,9 @@ export async function createStage1Session() {
   return { session_id: sessionId, message: greeting }
 }
 
-export async function createStage2Session(stage1SessionId) {
+export async function createStage2Session(inviteToken) {
   await delay(800)
-  const sessionId = createSession(2, stage1SessionId)
+  const sessionId = createSession(2, inviteToken)
   const greeting = `Hi there. Thanks for agreeing to take part in this knowledge capture session — I really appreciate your time.\n\nThis conversation is designed to help capture the important knowledge you carry in your role, so that your team and your successor have the best possible foundation going forward. There are no right or wrong answers — I'm just here to listen and ask the right questions.\n\nEverything you share will be used to create a handover document. You'll have the opportunity to flag anything as confidential.\n\nShall we begin?`
   return { session_id: sessionId, message: greeting }
 }
@@ -198,11 +198,13 @@ export async function sendMessage(sessionId, message) {
         message: `Thank you — I now have everything I need.\n\nI've generated a Role Intelligence Profile based on your answers. Please review the summary and, if everything looks correct, you can share the employee interview link with the departing team member.`,
         session_complete: true,
         profile: MOCK_PROFILE,
+        invite_token: 'mock-invite-' + sessionId,
+        manager_token: 'mock-manager-' + sessionId,
       }
     }
 
     return {
-      message: `Thank you so much for your time and openness today. The knowledge you've shared is incredibly valuable and will make a real difference for your team and successor.\n\nYour handover document is ready to be generated. You can choose your preferred format below.`,
+      message: `Thank you so much for your time and openness today. The knowledge you've shared is incredibly valuable and will make a real difference for your team and successor.\n\nYour answers will now be compiled into a handover document and shared with the designated recipients.`,
       session_complete: true,
       profile: null,
     }
@@ -229,7 +231,6 @@ export async function getSessionStatus(sessionId) {
     session_complete: session.complete,
     current_block: getBlock(session.questionIndex),
     current_question_index: session.questionIndex,
-    risk_flag_count: session.riskFlagCount,
   }
 }
 
@@ -362,19 +363,46 @@ The Senior Operations Manager role sits within a team of 8 in the Operations dep
 
 // Store generated blob URLs for cleanup
 const _blobUrls = {}
+const _managerDocs = {} // stage1SessionId -> { document_id, status }
 
-export async function generateDocument(sessionId, format) {
-  await delay(3000)
+function _createMockDocument() {
   const docId = 'mock-doc-' + Math.random().toString(36).slice(2, 8)
-
-  // Create a downloadable blob
   const blob = new Blob([MOCK_DOCUMENT_MARKDOWN], { type: 'text/markdown;charset=utf-8' })
-  const blobUrl = URL.createObjectURL(blob)
-  _blobUrls[docId] = blobUrl
+  _blobUrls[docId] = URL.createObjectURL(blob)
+  return docId
+}
+
+export async function getManagerOverview(stage1SessionId) {
+  await delay(400)
+
+  // Simulate the auto-generated document appearing shortly after completion
+  if (!_managerDocs[stage1SessionId]) {
+    _managerDocs[stage1SessionId] = {
+      document_id: _createMockDocument(),
+      status: 'complete',
+    }
+  }
+  const doc = _managerDocs[stage1SessionId]
 
   return {
+    stage1_session_id: stage1SessionId,
+    stage2_status: 'complete',
+    risk_flag_count: 3,
+    document_id: doc.document_id,
+    document_status: doc.status,
+    download_url: _blobUrls[doc.document_id],
+    document_error: null,
+  }
+}
+
+export async function managerGenerateDocument(stage1SessionId) {
+  await delay(3000)
+  const docId = _createMockDocument()
+  _managerDocs[stage1SessionId] = { document_id: docId, status: 'complete' }
+  return {
     document_id: docId,
-    download_url: blobUrl,
+    download_url: _blobUrls[docId],
+    status: 'complete',
   }
 }
 
