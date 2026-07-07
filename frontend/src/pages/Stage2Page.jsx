@@ -20,6 +20,7 @@ export default function Stage2Page() {
     loading,
     sessionComplete,
     currentBlock,
+    progress,
     error,
     sendMessage,
     addAgentMessage,
@@ -90,6 +91,7 @@ export default function Stage2Page() {
       loading={loading}
       stage={2}
       currentBlock={currentBlock}
+      progress={progress}
       sessionComplete={sessionComplete}
       title="Stage 2 — Employee Interview"
     >

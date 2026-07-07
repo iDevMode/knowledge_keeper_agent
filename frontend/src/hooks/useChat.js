@@ -9,6 +9,7 @@ export default function useChat(sessionId) {
   const [inviteToken, setInviteToken] = useState(null)
   const [managerToken, setManagerToken] = useState(null)
   const [currentBlock, setCurrentBlock] = useState(null)
+  const [progress, setProgress] = useState(null)
   const [error, setError] = useState(null)
 
   const addAgentMessage = useCallback((content) => {
@@ -62,6 +63,7 @@ export default function useChat(sessionId) {
         try {
           const status = await getSessionStatus(sessionId)
           setCurrentBlock(status.current_block)
+          if (status.progress) setProgress(status.progress)
         } catch {
           // Non-critical — don't block chat for status failures
         }
@@ -84,6 +86,7 @@ export default function useChat(sessionId) {
     inviteToken,
     managerToken,
     currentBlock,
+    progress,
     error,
     sendMessage,
     addAgentMessage,

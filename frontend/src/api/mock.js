@@ -231,6 +231,17 @@ export async function getSessionStatus(sessionId) {
     session_complete: session.complete,
     current_block: getBlock(session.questionIndex),
     current_question_index: session.questionIndex,
+    progress:
+      session.stage === 2
+        ? {
+            phase: 'knowledge_blocks',
+            section_number: Math.min(2 + Math.floor(session.questionIndex / 3), 7),
+            section_total: 7,
+            percent: Math.min(Math.round((session.questionIndex / 20) * 100), 99),
+            questions_asked: session.questionIndex,
+            question_budget: 27,
+          }
+        : null,
   }
 }
 

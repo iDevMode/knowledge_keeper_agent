@@ -69,6 +69,8 @@ class SessionStatusResponse(BaseModel):
     session_complete: bool
     current_block: Optional[str] = None
     current_question_index: Optional[int] = None
+    # Stage 2 only: honest progress (section n of m, percent, turn budget)
+    progress: Optional[Dict[str, Any]] = None
 
 class HistoryMessage(BaseModel):
     role: str  # "agent" | "user"
@@ -434,6 +436,10 @@ def create_stage2(request: CreateStage2Request):
         "answers": {},
         "conversation_history": [],
         "risk_flags": [],
+        "entities": {},
+        "sweep_questions": [],
+        "question_count": 0,
+        "question_budget": 0,
         "last_agent_message": "",
         "session_complete": False,
     }
@@ -532,6 +538,10 @@ def get_session_status(session_id: str):
         response.current_block = state.get("current_block")
         response.current_question_index = state.get("current_question_index")
         response.session_complete = state.get("session_complete", False)
+        if instance.stage == 2:
+            from agents.stage2_employee_interview.nodes import compute_progress
+
+            response.progress = compute_progress(state)
 
     return response
 

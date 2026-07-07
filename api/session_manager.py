@@ -309,3 +309,10 @@ def get_session_store() -> SessionStore:
     if _store is None:
         _store = _build_store()
     return _store
+
+
+def set_session_store(store: SessionStore | None) -> None:
+    """Replace the process-wide store (tests and the eval harness). Pass None
+    to fall back to settings-driven construction on next access."""
+    global _store
+    _store = store

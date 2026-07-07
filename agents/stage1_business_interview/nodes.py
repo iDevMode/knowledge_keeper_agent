@@ -2,7 +2,6 @@ import json
 import logging
 from typing import Any, Dict
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.stage1_business_interview.prompts import (
@@ -16,28 +15,20 @@ from agents.stage1_business_interview.prompts import (
 )
 from agents.stage1_business_interview.state import Stage1State
 from api.session_manager import get_session_store
+from config import llm_provider
 from config.constants import MAX_FOLLOWUPS_PER_QUESTION, STAGE1_BLOCKS, STAGE1_BLOCK_QUESTION_COUNTS
-from config.settings import settings
 from models.classifier_outputs import ConfirmationIntent, FollowupDecision
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
 logger = logging.getLogger(__name__)
 
 
-def _get_primary_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.primary_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=2048,
-    )
+def _get_primary_llm():
+    return llm_provider.get_primary_llm(max_tokens=2048)
 
 
-def _get_classifier_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.classifier_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=512,
-    )
+def _get_classifier_llm():
+    return llm_provider.get_classifier_llm(max_tokens=512)
 
 
 def validate_single_question(text: str) -> bool:
