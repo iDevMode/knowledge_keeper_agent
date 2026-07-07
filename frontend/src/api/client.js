@@ -3,7 +3,9 @@ import * as mock from './mock.js'
 const BASE = '/api'
 
 // Control via VITE_DEMO_MODE env var. Defaults to false (use real backend).
-const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
+// The Vercel preview builds with VITE_DEMO_MODE=true so it runs entirely on
+// the canned mock data below — no backend, no API key required.
+export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
 
 async function request(url, options = {}) {
   const res = await fetch(`${BASE}${url}`, {

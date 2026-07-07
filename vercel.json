@@ -1,10 +1,9 @@
 {
   "framework": null,
   "installCommand": "cd frontend && npm install",
-  "buildCommand": "cd frontend && npm run build",
+  "buildCommand": "cd frontend && VITE_DEMO_MODE=true npm run build",
   "outputDirectory": "frontend/dist",
   "routes": [
-    { "src": "/api/(.*)", "dest": "/api/app.py" },
     { "handle": "filesystem" },
     { "src": "/(.*)", "dest": "/index.html" }
   ]
