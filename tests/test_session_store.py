@@ -155,6 +155,13 @@ class TestInviteTokens:
         assert store.resolve_invite_token("bogus") is None
         assert store.is_invite_token_used("bogus") is False
 
+    def test_bound_session_enables_resume(self, store):
+        s1 = store.create_session(stage=1)
+        token = store.create_invite_token(s1)
+        s2 = store.create_session(stage=2)
+        store.consume_invite_token(token, stage2_session_id=s2)
+        assert store.get_invite_session(token) == s2
+
     def test_resolve_none_when_session_gone(self, store):
         """A token whose Stage 1 session has expired must not resolve."""
         s1 = store.create_session(stage=1)

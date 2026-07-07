@@ -18,7 +18,8 @@ class SessionStore(Protocol):
     def get_profile(self, session_id: str) -> Optional[RoleIntelligenceProfile]: ...
     def create_invite_token(self, stage1_id: str) -> str: ...
     def resolve_invite_token(self, token: str) -> Optional[str]: ...
-    def consume_invite_token(self, token: str) -> None: ...
+    def consume_invite_token(self, token: str, stage2_session_id: str | None = None) -> None: ...
+    def get_invite_session(self, token: str) -> Optional[str]: ...
     def create_manager_token(self, stage1_id: str) -> str: ...
     def validate_manager_token(self, stage1_id: str, token: str) -> bool: ...
     def delete_session(self, session_id: str) -> None: ...
@@ -106,10 +107,17 @@ class InMemorySessionStore:
         entry = self._invite_tokens.get(token)
         return bool(entry and entry["used"])
 
-    def consume_invite_token(self, token: str) -> None:
+    def consume_invite_token(self, token: str, stage2_session_id: str | None = None) -> None:
         entry = self._invite_tokens.get(token)
         if entry:
             entry["used"] = True
+            if stage2_session_id:
+                entry["stage2_session_id"] = stage2_session_id
+
+    def get_invite_session(self, token: str) -> Optional[str]:
+        """The Stage 2 session this invite created, if any (for resume)."""
+        entry = self._invite_tokens.get(token)
+        return entry.get("stage2_session_id") if entry else None
 
     def create_manager_token(self, stage1_id: str) -> str:
         """Create (or return the existing) manager token for a Stage 1 session."""
@@ -229,10 +237,16 @@ class PersistentSessionStore:
         entry = self._kv.get(self._INVITE + token)
         return bool(entry and entry["used"])
 
-    def consume_invite_token(self, token: str) -> None:
+    def get_invite_session(self, token: str) -> Optional[str]:
+        entry = self._kv.get(self._INVITE + token)
+        return entry.get("stage2_session_id") if entry else None
+
+    def consume_invite_token(self, token: str, stage2_session_id: str | None = None) -> None:
         entry = self._kv.get(self._INVITE + token)
         if entry:
             entry["used"] = True
+            if stage2_session_id:
+                entry["stage2_session_id"] = stage2_session_id
             self._kv.set(self._INVITE + token, entry, self._link_ttl)
 
     def create_manager_token(self, stage1_id: str) -> str:

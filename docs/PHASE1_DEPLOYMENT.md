@@ -1,5 +1,24 @@
 # Phase 1 — Going durable
 
+## Deployment model (read first)
+
+The FastAPI backend is designed to run as a **long-lived process in a
+persistent container — deploy it on Railway/Render using the provided
+`Dockerfile`.** It relies on an in-process background thread for document
+generation and on a shared, warm checkpointer/registry — neither of which
+survives a serverless function that is frozen or recycled between requests.
+
+**Vercel serves the frontend only.** The `vercel.json` in this repo points
+`/api/*` at the Python app for a quick preview, but a serverless deployment is
+**not** a supported backend host: with `STORAGE_BACKEND=memory` a session won't
+even persist between two messages, and background document generation is lost
+when the invocation returns. For anything beyond a static frontend preview,
+run the API on Railway with `STORAGE_BACKEND=persistent` and point the frontend
+at that origin.
+
+---
+
+
 Out of the box the app runs on `STORAGE_BACKEND=memory`: everything (sessions,
 conversation checkpoints, profiles, documents) lives in process memory and is
 **lost on restart**. That's fine for local dev and tests. For any real

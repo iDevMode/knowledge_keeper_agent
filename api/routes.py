@@ -154,15 +154,22 @@ class GraphRegistry:
             return self._locks[session_id]
 
     def delete_session_state(self, session_id: str) -> None:
-        """Best-effort erasure of a session's conversation checkpoints."""
+        """Erase a session's conversation checkpoints (right to erasure)."""
         with self._locks_guard:
             self._locks.pop(session_id, None)
         deleter = getattr(self._checkpointer, "delete_thread", None)
-        if callable(deleter):
-            try:
-                deleter(session_id)
-            except Exception as e:
-                logger.warning("session=%s checkpoint deletion failed: %s", session_id, e)
+        if not callable(deleter):
+            # The pinned checkpointer is expected to support this; if a future
+            # bump removes it, erasure would silently leave transcripts behind.
+            logger.error(
+                "checkpointer %s has no delete_thread — transcripts NOT erased for session=%s",
+                type(self._checkpointer).__name__, session_id,
+            )
+            return
+        try:
+            deleter(session_id)
+        except Exception as e:
+            logger.error("session=%s checkpoint deletion failed: %s", session_id, e)
 
 
 def _rehydrate_instance(session_id: str, session: Optional[dict] = None) -> Optional[GraphInstance]:
@@ -243,6 +250,25 @@ _CONTENT_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+
+# A generation job still "generating" past this is treated as failed — the
+# worker (or its whole container) died mid-run, so the manager isn't left
+# polling forever. Generous vs the ~10 min worst case (600s client timeout +
+# retries + export).
+_GENERATION_STALE_SECONDS = 1200
+
+
+def _effective_status(meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return meta with a stale 'generating' job downgraded to 'failed'."""
+    if not meta or meta.get("status") != "generating":
+        return meta
+    started = meta.get("started_at")
+    if started and (time.time() - started) > _GENERATION_STALE_SECONDS:
+        stale = dict(meta)
+        stale["status"] = "failed"
+        stale["error"] = "Generation timed out — please try generating again."
+        return stale
+    return meta
 
 
 # ---- Background Generation Worker ----
@@ -352,15 +378,26 @@ def create_stage2(request: CreateStage2Request):
     if not request.consent_acknowledged:
         raise HTTPException(status_code=400, detail="Consent is required to begin the interview")
 
-    # Resolve the single-use invite token — the employee never sees the
-    # Stage 1 session ID
-    if store.is_invite_token_used(request.invite_token):
-        raise HTTPException(
-            status_code=410,
-            detail="This interview link has already been used. Please ask for a new link.",
-        )
+    # Resolve the invite token — the employee never sees the Stage 1 session ID.
     stage1_session_id = store.resolve_invite_token(request.invite_token)
     if not stage1_session_id:
+        # An already-used token isn't a dead end: if its interview is still in
+        # progress (e.g. the employee cleared storage or switched device),
+        # resume that same session instead of locking them out.
+        if store.is_invite_token_used(request.invite_token):
+            existing = store.get_invite_session(request.invite_token)
+            existing_session = store.get_session(existing) if existing else None
+            if existing_session and not existing_session.get("session_complete"):
+                instance = _rehydrate_instance(existing, existing_session)
+                message = ""
+                if instance:
+                    message = instance.graph.get_state(instance.config).values.get("last_agent_message", "")
+                logger.info("session=%s stage=2 action=resumed", existing)
+                return SessionCreatedResponse(
+                    session_id=existing,
+                    message=message or "Welcome back — send a message to pick up where you left off.",
+                )
+            raise HTTPException(status_code=410, detail="This interview has already been completed.")
         raise HTTPException(status_code=404, detail="Invalid or expired interview link")
 
     # Validate Stage 1 session exists
@@ -378,7 +415,7 @@ def create_stage2(request: CreateStage2Request):
         metadata={"stage1_session_id": stage1_session_id, "consent_given_at": time.time()},
     )
     store.link_sessions(stage1_session_id, session_id)
-    store.consume_invite_token(request.invite_token)
+    store.consume_invite_token(request.invite_token, stage2_session_id=session_id)
 
     instance = _registry.create_stage2(session_id)
 
@@ -623,7 +660,7 @@ def manager_handover_overview(stage1_session_id: str, token: str):
 
     stage1_session = store.get_session(stage1_session_id) or {}
     document_id = stage1_session.get("latest_document_id")
-    meta = _doc_registry.get(document_id) if document_id else None
+    meta = _effective_status(_doc_registry.get(document_id) if document_id else None)
     complete = bool(meta and meta["status"] == "complete")
 
     return ManagerOverviewResponse(
@@ -750,6 +787,7 @@ def get_generation_status(document_id: str, token: str):
         raise HTTPException(status_code=404, detail="Document generation job not found")
     _require_manager_token(meta["owner_id"], token)
 
+    meta = _effective_status(meta)
     complete = meta["status"] == "complete"
     return GenerationStatusResponse(
         document_id=document_id,

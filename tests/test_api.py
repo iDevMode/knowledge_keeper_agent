@@ -215,15 +215,33 @@ class TestCreateStage2:
         assert store.get_linked_session(stage1_id) == stage2_id
         assert store.get_linked_session(stage2_id) == stage1_id
 
-    def test_invite_token_is_single_use(self, client, mock_llms):
+    def test_reopening_invite_resumes_same_session(self, client, mock_llms):
+        """A used invite whose interview is still in progress resumes the same
+        session (multi-sitting), rather than locking the employee out."""
         _, invite_token, _ = _setup_stage1_with_profile()
 
         first = client.post("/api/sessions/stage2", json={"invite_token": invite_token, "consent_acknowledged": True})
         assert first.status_code == 200
+        first_id = first.json()["session_id"]
+
+        second = client.post("/api/sessions/stage2", json={"invite_token": invite_token, "consent_acknowledged": True})
+        assert second.status_code == 200
+        assert second.json()["session_id"] == first_id  # resumed, not a new session
+
+    def test_reopening_invite_after_completion_is_gone(self, client, mock_llms):
+        import api.routes as routes_mod
+        _, invite_token, _ = _setup_stage1_with_profile()
+
+        first = client.post("/api/sessions/stage2", json={"invite_token": invite_token, "consent_acknowledged": True})
+        stage2_id = first.json()["session_id"]
+        # Mark the interview complete
+        inst = routes_mod._registry.instance_for(stage2_id, 2)
+        inst.graph.update_state(inst.config, {"session_complete": True})
+        from api.session_manager import get_session_store
+        get_session_store().update_session(stage2_id, {"session_complete": True})
 
         second = client.post("/api/sessions/stage2", json={"invite_token": invite_token, "consent_acknowledged": True})
         assert second.status_code == 410
-        assert "already been used" in second.json()["detail"].lower()
 
     def test_rejects_invalid_token(self, client, mock_llms):
         response = client.post(
@@ -540,11 +558,30 @@ class TestManagerDocumentFlow:
         assert routes_mod._blob_store.read("del-doc.docx") is None
         # Manager token no longer valid
         assert store.validate_manager_token(stage1_id, manager_token) is False
+        # Conversation checkpoints erased (right to erasure) — a fresh instance
+        # view for the stage2 thread has no persisted state.
+        inst = routes_mod._registry.instance_for(stage2_id, 2)
+        assert inst.graph.get_state(inst.config).values == {}
 
     def test_delete_engagement_rejects_bad_token(self, client, mock_llms):
         _, stage1_id, _ = _setup_completed_stage2(client)
         response = client.delete(f"/api/manager/{stage1_id}?token=wrong")
         assert response.status_code == 403
+
+    def test_stale_generation_reported_failed(self, client, mock_llms):
+        """A job stuck 'generating' past the threshold (worker died) is reported
+        failed so the manager isn't left polling forever."""
+        import time
+        import api.routes as routes_mod
+        _, stage1_id, manager_token = _setup_completed_stage2(client)
+        routes_mod._doc_registry.create("stale-doc", owner_id=stage1_id, fmt="docx")
+        # Backdate the start beyond the stale threshold.
+        routes_mod._doc_registry._d["stale-doc"]["started_at"] = time.time() - (routes_mod._GENERATION_STALE_SECONDS + 60)
+
+        resp = client.get(f"/api/documents/stale-doc/status?token={manager_token}")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "failed"
+        assert "timed out" in resp.json()["error"].lower()
 
     def test_no_employee_facing_generate_endpoint(self, client, mock_llms):
         """The employee session must not be able to trigger generation."""

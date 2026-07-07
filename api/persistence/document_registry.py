@@ -9,6 +9,7 @@ status and download from any worker, and links survive a restart.
 - persistent → Redis (shared across workers, TTL'd)
 """
 
+import time
 from typing import Any, Dict, Optional
 
 from config.settings import settings
@@ -24,6 +25,7 @@ def _new_record(document_id: str, owner_id: str, fmt: str) -> Dict[str, Any]:
         "content_type": None,
         "filename": None,
         "error": None,
+        "started_at": time.time(),
     }
 
 
