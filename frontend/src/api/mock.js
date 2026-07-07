@@ -408,6 +408,7 @@ export async function getManagerOverview(stage1SessionId) {
     document_status: doc.status,
     download_url: _blobUrls[doc.document_id],
     document_error: null,
+    delivery_email: _deliveryEmails[stage1SessionId] || null,
   }
 }
 
@@ -420,6 +421,14 @@ export async function managerGenerateDocument(stage1SessionId) {
     download_url: _blobUrls[docId],
     status: 'complete',
   }
+}
+
+const _deliveryEmails = {}
+
+export async function setDeliveryEmail(stage1SessionId, token, email) {
+  await delay(400)
+  _deliveryEmails[stage1SessionId] = email
+  return { ok: true, emailed: Boolean(_managerDocs[stage1SessionId]) }
 }
 
 export function getDownloadUrl(documentId) {

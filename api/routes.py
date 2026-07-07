@@ -20,6 +20,7 @@ from agents.stage1_business_interview.graph import build_stage1_graph
 from agents.stage2_employee_interview.graph import build_stage2_graph
 from agents.stage3_document_generation.generator import GenerationRequest, generate_document
 from api.persistence.checkpointer import create_checkpointer
+from api.notifications import create_email_sender, deliver_handover
 from api.persistence.document_registry import create_document_registry
 from api.persistence.document_store import create_blob_store
 from api.session_manager import get_session_store
@@ -43,6 +44,9 @@ class SendMessageRequest(BaseModel):
 
 class GenerateDocumentRequest(BaseModel):
     format: str = Field(default="docx", pattern=r"^(docx|pdf)$")
+
+class SetDeliveryEmailRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
 
 class SessionCreatedResponse(BaseModel):
     session_id: str
@@ -93,6 +97,7 @@ class ManagerOverviewResponse(BaseModel):
     document_status: Optional[str] = None  # "generating" | "complete" | "failed"
     download_url: Optional[str] = None
     document_error: Optional[str] = None
+    delivery_email: Optional[str] = None
 
 
 # ---- GraphRegistry ----
@@ -218,6 +223,7 @@ _registry = GraphRegistry(checkpointer=create_checkpointer())
 # restart and work across workers.
 _blob_store = create_blob_store()
 _doc_registry = create_document_registry()
+_email_sender = create_email_sender()
 
 _CONTENT_TYPES = {
     "pdf": "application/pdf",
@@ -269,6 +275,15 @@ def _run_generation_in_background(
 
         on_document_generated(session_id, document_id, key)
         logger.info("session=%s document=%s format=%s generation=complete", session_id, document_id, ext)
+
+        # Best-effort delivery — never fails the generation.
+        deliver_handover(
+            store=get_session_store(),
+            sender=_email_sender,
+            stage2_session_id=session_id,
+            document_id=document_id,
+            gen_request=gen_request,
+        )
 
     except Exception as e:
         logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
@@ -598,6 +613,7 @@ def manager_handover_overview(stage1_session_id: str, token: str):
         document_status=meta["status"] if meta else None,
         download_url=f"/api/documents/{document_id}" if complete else None,
         document_error=meta.get("error") if meta else None,
+        delivery_email=stage1_session.get("manager_email"),
     )
 
 
@@ -619,6 +635,50 @@ def manager_generate_document(stage1_session_id: str, request: GenerateDocumentR
         download_url=f"/api/documents/{document_id}",
         status="generating",
     )
+
+
+@app.post("/api/manager/{stage1_session_id}/delivery-email")
+def set_delivery_email(stage1_session_id: str, request: SetDeliveryEmailRequest, token: str):
+    """Set the manager's delivery email. If a completed handover already exists,
+    email it now; otherwise it will be emailed automatically on completion."""
+    _require_manager_token(stage1_session_id, token)
+
+    email = request.email.strip()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+
+    store = get_session_store()
+    store.update_session(stage1_session_id, {"manager_email": email})
+
+    # Deliver immediately if a completed document is already waiting.
+    emailed = False
+    stage1_session = store.get_session(stage1_session_id) or {}
+    document_id = stage1_session.get("latest_document_id")
+    stage2_id = store.get_linked_session(stage1_session_id)
+    meta = _doc_registry.get(document_id) if document_id else None
+
+    if meta and meta["status"] == "complete" and stage2_id:
+        instance = _rehydrate_instance(stage2_id)
+        if instance:
+            state = instance.graph.get_state(instance.config).values
+            gen_ctx = GenerationRequest(
+                session_id=stage2_id,
+                profile=store.get_profile(stage1_session_id),
+                conversation_history=state.get("conversation_history", []),
+                risk_flags=state.get("risk_flags", []),
+                answers=state.get("answers", {}),
+                block_order=state.get("block_order", []),
+                block_depths=state.get("block_depths", {}),
+            )
+            emailed = deliver_handover(
+                store=store,
+                sender=_email_sender,
+                stage2_session_id=stage2_id,
+                document_id=document_id,
+                gen_request=gen_ctx,
+            )
+
+    return {"ok": True, "emailed": emailed}
 
 
 @app.get("/api/documents/{document_id}/status", response_model=GenerationStatusResponse)

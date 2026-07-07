@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     # API
     api_secret_key: str = ""
     allowed_origins: str = "http://localhost:3000"
+    # Absolute base URL for links in emails (e.g. https://app.example.com).
+    # Falls back to the first allowed origin if unset.
+    public_base_url: str = ""
+
+    # Email delivery: "console" (dev — logs the message) or "smtp"
+    email_backend: str = "console"
+    email_from: str = "KnowledgeKeeper <no-reply@knowledgekeeper.app>"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
 
     # Environment
     environment: str = "development"

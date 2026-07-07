@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { getManagerOverview, managerGenerateDocument, getDownloadUrl } from '../api/client'
+import {
+  getManagerOverview,
+  managerGenerateDocument,
+  setDeliveryEmail,
+  getDownloadUrl,
+} from '../api/client'
 
 const POLL_INTERVAL_MS = 5000
 
@@ -17,6 +22,9 @@ export default function ManagerPage() {
   const [overview, setOverview] = useState(null)
   const [error, setError] = useState(null)
   const [regenerating, setRegenerating] = useState(false)
+  const [emailInput, setEmailInput] = useState('')
+  const [savingEmail, setSavingEmail] = useState(false)
+  const [emailNotice, setEmailNotice] = useState(null)
   const pollRef = useRef(null)
 
   const refresh = useCallback(async () => {
@@ -45,6 +53,22 @@ export default function ManagerPage() {
       setError(err.message)
     } finally {
       setRegenerating(false)
+    }
+  }
+
+  async function saveEmail(e) {
+    e.preventDefault()
+    setSavingEmail(true)
+    setEmailNotice(null)
+    try {
+      const res = await setDeliveryEmail(stage1SessionId, token, emailInput.trim())
+      setEmailInput('')
+      setEmailNotice(res.emailed ? 'Saved — handover emailed.' : 'Saved. The handover will be emailed when ready.')
+      await refresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSavingEmail(false)
     }
   }
 
@@ -131,6 +155,37 @@ export default function ManagerPage() {
               ))}
             </div>
           )}
+        </div>
+
+        {/* Email delivery */}
+        <div className="bg-parchment-50 border border-parchment-200 rounded-xl p-4 mt-4 text-sm">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-parchment-500">Email delivery</span>
+            <span className="text-ink font-medium">
+              {overview?.delivery_email || 'Not set'}
+            </span>
+          </div>
+          <form onSubmit={saveEmail} className="flex items-center gap-2">
+            <input
+              type="email"
+              required
+              value={emailInput}
+              onChange={(e) => setEmailInput(e.target.value)}
+              placeholder="you@company.com"
+              className="flex-1 px-3 py-2.5 rounded-lg border border-parchment-300 bg-white text-sm text-ink"
+            />
+            <button
+              type="submit"
+              disabled={savingEmail}
+              className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-keeper-500 text-white text-sm font-medium hover:bg-keeper-400 transition-colors disabled:opacity-60"
+            >
+              {savingEmail ? 'Saving…' : 'Email me the handover'}
+            </button>
+          </form>
+          {emailNotice && <p className="mt-2 text-xs text-keeper-500">{emailNotice}</p>}
+          <p className="mt-2 text-xs text-parchment-400">
+            We'll send a private download link to this address when the handover is ready.
+          </p>
         </div>
       </div>
     </div>

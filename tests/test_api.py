@@ -463,6 +463,34 @@ class TestManagerDocumentFlow:
         assert response.status_code == 200
         assert response.json()["stage2_status"] == "not_started"
 
+    def test_set_delivery_email(self, client, mock_llms):
+        _, stage1_id, manager_token = _setup_completed_stage2(client)
+        response = client.post(
+            f"/api/manager/{stage1_id}/delivery-email?token={manager_token}",
+            json={"email": "manager@example.com"},
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+        overview = client.get(f"/api/manager/{stage1_id}/handover?token={manager_token}").json()
+        assert overview["delivery_email"] == "manager@example.com"
+
+    def test_delivery_email_rejects_bad_token(self, client, mock_llms):
+        _, stage1_id, _ = _setup_completed_stage2(client)
+        response = client.post(
+            f"/api/manager/{stage1_id}/delivery-email?token=wrong",
+            json={"email": "manager@example.com"},
+        )
+        assert response.status_code == 403
+
+    def test_delivery_email_rejects_invalid_address(self, client, mock_llms):
+        _, stage1_id, manager_token = _setup_completed_stage2(client)
+        response = client.post(
+            f"/api/manager/{stage1_id}/delivery-email?token={manager_token}",
+            json={"email": "not-an-email"},
+        )
+        assert response.status_code == 422
+
     def test_no_employee_facing_generate_endpoint(self, client, mock_llms):
         """The employee session must not be able to trigger generation."""
         session_id, _, _ = _setup_completed_stage2(client)

@@ -77,6 +77,18 @@ export async function managerGenerateDocument(stage1SessionId, token, format = '
   return res.json()
 }
 
+export async function setDeliveryEmail(stage1SessionId, token, email) {
+  if (DEMO_MODE) return mock.setDeliveryEmail(stage1SessionId, token, email)
+  const res = await request(
+    `/manager/${stage1SessionId}/delivery-email?token=${encodeURIComponent(token)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }
+  )
+  return res.json()
+}
+
 export function getDownloadUrl(documentId, token) {
   if (DEMO_MODE) return mock.getDownloadUrl(documentId, token)
   return `${BASE}/documents/${documentId}?token=${encodeURIComponent(token)}`
