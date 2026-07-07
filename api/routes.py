@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,8 @@ class CreateStage2Request(BaseModel):
     # Employee sessions are created from a single-use invite token, never from
     # the Stage 1 session ID — the manager's session must stay private.
     invite_token: str
+    # GDPR: the employee must explicitly consent before the interview begins.
+    consent_acknowledged: bool = False
 
 class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=10000)
@@ -149,6 +152,17 @@ class GraphRegistry:
             if session_id not in self._locks:
                 self._locks[session_id] = threading.Lock()
             return self._locks[session_id]
+
+    def delete_session_state(self, session_id: str) -> None:
+        """Best-effort erasure of a session's conversation checkpoints."""
+        with self._locks_guard:
+            self._locks.pop(session_id, None)
+        deleter = getattr(self._checkpointer, "delete_thread", None)
+        if callable(deleter):
+            try:
+                deleter(session_id)
+            except Exception as e:
+                logger.warning("session=%s checkpoint deletion failed: %s", session_id, e)
 
 
 def _rehydrate_instance(session_id: str, session: Optional[dict] = None) -> Optional[GraphInstance]:
@@ -334,6 +348,10 @@ def create_stage1():
 def create_stage2(request: CreateStage2Request):
     store = get_session_store()
 
+    # GDPR: no interview without explicit consent.
+    if not request.consent_acknowledged:
+        raise HTTPException(status_code=400, detail="Consent is required to begin the interview")
+
     # Resolve the single-use invite token — the employee never sees the
     # Stage 1 session ID
     if store.is_invite_token_used(request.invite_token):
@@ -355,7 +373,10 @@ def create_stage2(request: CreateStage2Request):
     if not profile:
         raise HTTPException(status_code=400, detail="Stage 1 profile not yet generated")
 
-    session_id = store.create_session(stage=2, metadata={"stage1_session_id": stage1_session_id})
+    session_id = store.create_session(
+        stage=2,
+        metadata={"stage1_session_id": stage1_session_id, "consent_given_at": time.time()},
+    )
     store.link_sessions(stage1_session_id, session_id)
     store.consume_invite_token(request.invite_token)
 
@@ -679,6 +700,46 @@ def set_delivery_email(stage1_session_id: str, request: SetDeliveryEmailRequest,
             )
 
     return {"ok": True, "emailed": emailed}
+
+
+@app.delete("/api/manager/{stage1_session_id}")
+def delete_engagement(stage1_session_id: str, token: str):
+    """Right to erasure: permanently delete everything for this engagement —
+    both sessions, the profile, the linked documents, conversation checkpoints,
+    and the tokens. Manager-token gated."""
+    _require_manager_token(stage1_session_id, token)
+    store = get_session_store()
+
+    stage1_session = store.get_session(stage1_session_id) or {}
+    stage2_id = store.get_linked_session(stage1_session_id)
+
+    # Documents (blob bytes + metadata)
+    document_id = stage1_session.get("latest_document_id")
+    if document_id:
+        meta = _doc_registry.get(document_id)
+        if meta and meta.get("key"):
+            try:
+                _blob_store.delete(meta["key"])
+            except Exception as e:
+                logger.warning("document=%s blob deletion failed: %s", document_id, e)
+        _doc_registry.delete(document_id)
+
+    # Conversation checkpoints for both threads
+    _registry.delete_session_state(stage1_session_id)
+    if stage2_id:
+        _registry.delete_session_state(stage2_id)
+
+    # Session store: profile, links, tokens, sessions
+    store.delete_profile(stage1_session_id)
+    store.delete_invite_tokens_for(stage1_session_id)
+    store.delete_manager_token(stage1_session_id)
+    store.delete_link(stage1_session_id)
+    if stage2_id:
+        store.delete_session(stage2_id)
+    store.delete_session(stage1_session_id)
+
+    logger.info("engagement stage1=%s stage2=%s action=deleted", stage1_session_id, stage2_id)
+    return {"ok": True, "deleted": True}
 
 
 @app.get("/api/documents/{document_id}/status", response_model=GenerationStatusResponse)

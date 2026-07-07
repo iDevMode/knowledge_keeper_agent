@@ -24,12 +24,12 @@ export async function createStage1Session() {
 }
 
 // The employee link carries a single-use invite token — never the manager's
-// Stage 1 session ID.
-export async function createStage2Session(inviteToken) {
-  if (DEMO_MODE) return mock.createStage2Session(inviteToken)
+// Stage 1 session ID. Requires explicit consent (GDPR).
+export async function createStage2Session(inviteToken, consentAcknowledged = false) {
+  if (DEMO_MODE) return mock.createStage2Session(inviteToken, consentAcknowledged)
   const res = await request('/sessions/stage2', {
     method: 'POST',
-    body: JSON.stringify({ invite_token: inviteToken }),
+    body: JSON.stringify({ invite_token: inviteToken, consent_acknowledged: consentAcknowledged }),
   })
   return res.json()
 }
@@ -85,6 +85,15 @@ export async function setDeliveryEmail(stage1SessionId, token, email) {
       method: 'POST',
       body: JSON.stringify({ email }),
     }
+  )
+  return res.json()
+}
+
+export async function deleteEngagement(stage1SessionId, token) {
+  if (DEMO_MODE) return mock.deleteEngagement(stage1SessionId, token)
+  const res = await request(
+    `/manager/${stage1SessionId}?token=${encodeURIComponent(token)}`,
+    { method: 'DELETE' }
   )
   return res.json()
 }

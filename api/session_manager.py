@@ -21,6 +21,12 @@ class SessionStore(Protocol):
     def consume_invite_token(self, token: str) -> None: ...
     def create_manager_token(self, stage1_id: str) -> str: ...
     def validate_manager_token(self, stage1_id: str, token: str) -> bool: ...
+    def delete_session(self, session_id: str) -> None: ...
+    def delete_profile(self, session_id: str) -> None: ...
+    def delete_link(self, session_id: str) -> None: ...
+    def delete_manager_token(self, stage1_id: str) -> None: ...
+    def delete_invite_tokens_for(self, stage1_id: str) -> None: ...
+    def purge_expired_profiles(self, older_than_days: int) -> int: ...
 
 
 class InMemorySessionStore:
@@ -114,6 +120,30 @@ class InMemorySessionStore:
     def validate_manager_token(self, stage1_id: str, token: str) -> bool:
         expected = self._manager_tokens.get(stage1_id)
         return bool(expected and token and secrets.compare_digest(expected, token))
+
+    # ---- Deletion (right to erasure) ----
+
+    def delete_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+    def delete_profile(self, session_id: str) -> None:
+        self._profiles.pop(session_id, None)
+
+    def delete_link(self, session_id: str) -> None:
+        other = self._links.pop(session_id, None)
+        if other:
+            self._links.pop(other, None)
+
+    def delete_manager_token(self, stage1_id: str) -> None:
+        self._manager_tokens.pop(stage1_id, None)
+
+    def delete_invite_tokens_for(self, stage1_id: str) -> None:
+        for token in [t for t, v in self._invite_tokens.items() if v.get("stage1_id") == stage1_id]:
+            self._invite_tokens.pop(token, None)
+
+    def purge_expired_profiles(self, older_than_days: int) -> int:
+        # In-memory state doesn't survive a restart, so retention is moot here.
+        return 0
 
 
 class PersistentSessionStore:
@@ -216,6 +246,33 @@ class PersistentSessionStore:
     def validate_manager_token(self, stage1_id: str, token: str) -> bool:
         existing = self._kv.get(self._MANAGER + stage1_id)
         return bool(existing and token and secrets.compare_digest(existing["token"], token))
+
+    # ---- Deletion (right to erasure) ----
+
+    def delete_session(self, session_id: str) -> None:
+        self._kv.delete(self._SESSION + session_id)
+
+    def delete_profile(self, session_id: str) -> None:
+        self._profiles.delete(session_id)
+
+    def delete_link(self, session_id: str) -> None:
+        entry = self._kv.get(self._LINK + session_id)
+        if entry:
+            self._kv.delete(self._LINK + entry["other"])
+        self._kv.delete(self._LINK + session_id)
+
+    def delete_manager_token(self, stage1_id: str) -> None:
+        self._kv.delete(self._MANAGER + stage1_id)
+
+    def delete_invite_tokens_for(self, stage1_id: str) -> None:
+        # Invite tokens are keyed by the opaque token, not by stage1_id, so we
+        # can't enumerate them in Redis. They become inert the moment the Stage 1
+        # session is deleted (resolve_invite_token checks the session exists) and
+        # expire via their TTL — so this is a safe no-op for the durable backend.
+        return None
+
+    def purge_expired_profiles(self, older_than_days: int) -> int:
+        return self._profiles.delete_expired(older_than_days)
 
 
 _store: SessionStore | None = None

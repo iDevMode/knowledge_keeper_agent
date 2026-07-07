@@ -203,7 +203,7 @@ class TestCreateStage2:
 
         response = client.post(
             "/api/sessions/stage2",
-            json={"invite_token": invite_token},
+            json={"invite_token": invite_token, "consent_acknowledged": True},
         )
         assert response.status_code == 200
         data = response.json()
@@ -218,26 +218,46 @@ class TestCreateStage2:
     def test_invite_token_is_single_use(self, client, mock_llms):
         _, invite_token, _ = _setup_stage1_with_profile()
 
-        first = client.post("/api/sessions/stage2", json={"invite_token": invite_token})
+        first = client.post("/api/sessions/stage2", json={"invite_token": invite_token, "consent_acknowledged": True})
         assert first.status_code == 200
 
-        second = client.post("/api/sessions/stage2", json={"invite_token": invite_token})
+        second = client.post("/api/sessions/stage2", json={"invite_token": invite_token, "consent_acknowledged": True})
         assert second.status_code == 410
         assert "already been used" in second.json()["detail"].lower()
 
     def test_rejects_invalid_token(self, client, mock_llms):
         response = client.post(
             "/api/sessions/stage2",
-            json={"invite_token": "not-a-real-token"},
+            json={"invite_token": "not-a-real-token", "consent_acknowledged": True},
         )
         assert response.status_code == 404
+
+    def test_rejects_without_consent(self, client, mock_llms):
+        _, invite_token, _ = _setup_stage1_with_profile()
+        response = client.post(
+            "/api/sessions/stage2",
+            json={"invite_token": invite_token},  # consent omitted → defaults False
+        )
+        assert response.status_code == 400
+        assert "consent" in response.json()["detail"].lower()
+
+    def test_records_consent_timestamp(self, client, mock_llms):
+        from api.session_manager import get_session_store
+        _, invite_token, _ = _setup_stage1_with_profile()
+        resp = client.post(
+            "/api/sessions/stage2",
+            json={"invite_token": invite_token, "consent_acknowledged": True},
+        )
+        stage2_id = resp.json()["session_id"]
+        session = get_session_store().get_session(stage2_id)
+        assert session.get("consent_given_at") is not None
 
     def test_rejects_stage1_session_id_as_token(self, client, mock_llms):
         """The Stage 1 session ID must not work as an invite token."""
         stage1_id, _, _ = _setup_stage1_with_profile()
         response = client.post(
             "/api/sessions/stage2",
-            json={"invite_token": stage1_id},
+            json={"invite_token": stage1_id, "consent_acknowledged": True},
         )
         assert response.status_code == 404
 
@@ -250,7 +270,7 @@ class TestCreateStage2:
 
         response = client.post(
             "/api/sessions/stage2",
-            json={"invite_token": invite_token},
+            json={"invite_token": invite_token, "consent_acknowledged": True},
         )
         assert response.status_code == 400
         assert "profile" in response.json()["detail"].lower()
@@ -331,7 +351,7 @@ class TestSessionStatus:
 
         create_resp = client.post(
             "/api/sessions/stage2",
-            json={"invite_token": invite_token},
+            json={"invite_token": invite_token, "consent_acknowledged": True},
         )
         session_id = create_resp.json()["session_id"]
 
@@ -389,7 +409,7 @@ def _setup_completed_stage2(client):
 
     create_resp = client.post(
         "/api/sessions/stage2",
-        json={"invite_token": invite_token},
+        json={"invite_token": invite_token, "consent_acknowledged": True},
     )
     session_id = create_resp.json()["session_id"]
 
@@ -433,7 +453,7 @@ class TestManagerDocumentFlow:
 
     def test_generate_rejects_incomplete_stage2(self, client, mock_llms):
         stage1_id, invite_token, manager_token = _setup_stage1_with_profile()
-        client.post("/api/sessions/stage2", json={"invite_token": invite_token})
+        client.post("/api/sessions/stage2", json={"invite_token": invite_token, "consent_acknowledged": True})
 
         # Stage 2 not complete — should be rejected
         response = client.post(
@@ -490,6 +510,41 @@ class TestManagerDocumentFlow:
             json={"email": "not-an-email"},
         )
         assert response.status_code == 422
+
+    def test_delete_engagement_cascades(self, client, mock_llms):
+        import api.routes as routes_mod
+        from api.session_manager import get_session_store
+
+        stage2_id, stage1_id, manager_token = _setup_completed_stage2(client)
+        store = get_session_store()
+
+        # Seed a completed document so deletion has something to cascade to.
+        routes_mod._doc_registry.create("del-doc", owner_id=stage1_id, fmt="docx")
+        routes_mod._blob_store.put("del-doc.docx", b"bytes")
+        routes_mod._doc_registry.mark_complete(
+            "del-doc", key="del-doc.docx",
+            content_type="application/x", filename="H.docx",
+        )
+        store.update_session(stage1_id, {"latest_document_id": "del-doc"})
+
+        response = client.delete(f"/api/manager/{stage1_id}?token={manager_token}")
+        assert response.status_code == 200
+        assert response.json()["deleted"] is True
+
+        # Everything is gone
+        assert store.get_session(stage1_id) is None
+        assert store.get_session(stage2_id) is None
+        assert store.get_profile(stage1_id) is None
+        assert store.get_linked_session(stage1_id) is None
+        assert routes_mod._doc_registry.get("del-doc") is None
+        assert routes_mod._blob_store.read("del-doc.docx") is None
+        # Manager token no longer valid
+        assert store.validate_manager_token(stage1_id, manager_token) is False
+
+    def test_delete_engagement_rejects_bad_token(self, client, mock_llms):
+        _, stage1_id, _ = _setup_completed_stage2(client)
+        response = client.delete(f"/api/manager/{stage1_id}?token=wrong")
+        assert response.status_code == 403
 
     def test_no_employee_facing_generate_endpoint(self, client, mock_llms):
         """The employee session must not be able to trigger generation."""

@@ -39,6 +39,11 @@ class LocalDocumentBlobStore:
     def exists(self, key: str) -> bool:
         return self._path(key).exists()
 
+    def delete(self, key: str) -> None:
+        path = self._path(key)
+        if path.exists():
+            path.unlink()
+
 
 class S3DocumentBlobStore:
     def __init__(self, bucket: str, endpoint_url: str = "", region: str = ""):
@@ -67,6 +72,9 @@ class S3DocumentBlobStore:
             return True
         except Exception:
             return False
+
+    def delete(self, key: str) -> None:
+        self._client.delete_object(Bucket=self._bucket, Key=key)
 
 
 def create_blob_store():

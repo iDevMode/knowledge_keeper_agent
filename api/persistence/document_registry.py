@@ -48,6 +48,9 @@ class InMemoryDocumentRegistry:
         rec = self._d.get(document_id)
         return dict(rec) if rec else None
 
+    def delete(self, document_id: str) -> None:
+        self._d.pop(document_id, None)
+
 
 class RedisDocumentRegistry:
     """Same contract, backed by a JSON KV (RedisKVStore)."""
@@ -78,6 +81,9 @@ class RedisDocumentRegistry:
 
     def get(self, document_id: str) -> Optional[Dict[str, Any]]:
         return self._kv.get(self._key(document_id))
+
+    def delete(self, document_id: str) -> None:
+        self._kv.delete(self._key(document_id))
 
 
 def create_document_registry():

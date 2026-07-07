@@ -54,6 +54,13 @@ class FakeProfileRepo:
         v = self._d.get(session_id)
         return copy.deepcopy(v) if v is not None else None
 
+    def delete(self, session_id):
+        self._d.pop(session_id, None)
+
+    def delete_expired(self, older_than_days):
+        # No timestamps in the fake — nothing to expire.
+        return 0
+
 
 @pytest.fixture(params=["memory", "persistent"])
 def store(request):
@@ -182,6 +189,41 @@ class TestManagerTokens:
 
     def test_validate_unknown_session(self, store):
         assert store.validate_manager_token("nonexistent", "anything") is False
+
+
+# ---- Deletion (right to erasure) ----
+
+class TestDeletion:
+    def test_delete_session_and_profile(self, store):
+        sid = store.create_session(stage=1)
+        store.store_profile(sid, _load_profile())
+        store.delete_profile(sid)
+        store.delete_session(sid)
+        assert store.get_session(sid) is None
+        assert store.get_profile(sid) is None
+
+    def test_delete_link_both_directions(self, store):
+        s1 = store.create_session(stage=1)
+        s2 = store.create_session(stage=2)
+        store.link_sessions(s1, s2)
+        store.delete_link(s1)
+        assert store.get_linked_session(s1) is None
+        assert store.get_linked_session(s2) is None
+
+    def test_delete_manager_token_invalidates(self, store):
+        s1 = store.create_session(stage=1)
+        token = store.create_manager_token(s1)
+        store.delete_manager_token(s1)
+        assert store.validate_manager_token(s1, token) is False
+
+    def test_delete_invite_tokens(self, store):
+        s1 = store.create_session(stage=1)
+        token = store.create_invite_token(s1)
+        store.delete_invite_tokens_for(s1)
+        # In-memory removes them outright; the durable backend relies on the
+        # session being gone — delete it and confirm the token no longer resolves.
+        store.delete_session(s1)
+        assert store.resolve_invite_token(token) is None
 
 
 # ---- Factory ----

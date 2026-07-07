@@ -29,6 +29,10 @@ DO UPDATE SET profile = EXCLUDED.profile, updated_at = now();
 
 _SELECT = "SELECT profile FROM role_profiles WHERE session_id = %s;"
 
+_DELETE = "DELETE FROM role_profiles WHERE session_id = %s;"
+
+_DELETE_EXPIRED = "DELETE FROM role_profiles WHERE created_at < now() - make_interval(days => %s);"
+
 
 class PostgresProfileRepo:
     def __init__(self, dsn: str):
@@ -56,3 +60,16 @@ class PostgresProfileRepo:
             cur.execute(_SELECT, (session_id,))
             row = cur.fetchone()
             return row[0] if row else None
+
+    def delete(self, session_id: str) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(_DELETE, (session_id,))
+            conn.commit()
+
+    def delete_expired(self, older_than_days: int) -> int:
+        """Purge profiles past the retention window. Returns rows deleted."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(_DELETE_EXPIRED, (older_than_days,))
+            deleted = cur.rowcount
+            conn.commit()
+            return deleted

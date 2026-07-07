@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import ChatWindow from '../components/ChatWindow'
 import SessionComplete from '../components/SessionComplete'
+import ConsentScreen from '../components/ConsentScreen'
 import useChat from '../hooks/useChat'
 import { createStage2Session } from '../api/client'
 
@@ -11,7 +12,7 @@ export default function Stage2Page() {
     return sessionStorage.getItem(`stage2_session_${inviteToken}`)
   })
   const [initError, setInitError] = useState(null)
-  const [initializing, setInitializing] = useState(!sessionId)
+  const [initializing, setInitializing] = useState(false)
   const initRef = useRef(false)
 
   const {
@@ -26,26 +27,23 @@ export default function Stage2Page() {
     setCurrentBlock,
   } = useChat(sessionId)
 
-  useEffect(() => {
+  // Session creation is deferred until the employee gives consent.
+  async function handleConsent() {
     if (initRef.current || sessionId) return
     initRef.current = true
-
-    async function init() {
-      try {
-        const data = await createStage2Session(inviteToken)
-        setSessionId(data.session_id)
-        sessionStorage.setItem(`stage2_session_${inviteToken}`, data.session_id)
-        addAgentMessage(data.message)
-        setCurrentBlock('role_orientation')
-      } catch (err) {
-        setInitError(err.message)
-      } finally {
-        setInitializing(false)
-      }
+    setInitializing(true)
+    try {
+      const data = await createStage2Session(inviteToken, true)
+      setSessionId(data.session_id)
+      sessionStorage.setItem(`stage2_session_${inviteToken}`, data.session_id)
+      addAgentMessage(data.message)
+      setCurrentBlock('role_orientation')
+    } catch (err) {
+      setInitError(err.message)
+    } finally {
+      setInitializing(false)
     }
-
-    init()
-  }, [inviteToken, sessionId, addAgentMessage, setCurrentBlock])
+  }
 
   // Handle page refresh / later sitting — session exists in storage but the
   // in-memory transcript is gone. Restore it from the server.
@@ -61,15 +59,10 @@ export default function Stage2Page() {
     }
   }, [sessionId, messages.length, initializing, restoreHistory, addAgentMessage])
 
-  if (initializing) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center animate-page-in">
-          <div className="w-8 h-8 border-2 border-keeper-500/30 border-t-keeper-500 rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-sm text-parchment-500">Preparing your interview...</p>
-        </div>
-      </div>
-    )
+  // Fresh employee (no session yet) must consent before the interview starts.
+  // Returning employees (session in storage) skip straight to their transcript.
+  if (!sessionId && !initError) {
+    return <ConsentScreen onAccept={handleConsent} loading={initializing} />
   }
 
   if (initError) {

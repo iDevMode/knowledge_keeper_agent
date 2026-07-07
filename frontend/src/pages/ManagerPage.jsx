@@ -4,6 +4,7 @@ import {
   getManagerOverview,
   managerGenerateDocument,
   setDeliveryEmail,
+  deleteEngagement,
   getDownloadUrl,
 } from '../api/client'
 
@@ -25,6 +26,8 @@ export default function ManagerPage() {
   const [emailInput, setEmailInput] = useState('')
   const [savingEmail, setSavingEmail] = useState(false)
   const [emailNotice, setEmailNotice] = useState(null)
+  const [deleted, setDeleted] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const pollRef = useRef(null)
 
   const refresh = useCallback(async () => {
@@ -56,6 +59,24 @@ export default function ManagerPage() {
     }
   }
 
+  async function handleDelete() {
+    if (!window.confirm(
+      'Permanently delete all data for this handover — both interviews, the profile, ' +
+      'the document, and the conversation transcripts? This cannot be undone.'
+    )) return
+    setDeleting(true)
+    try {
+      await deleteEngagement(stage1SessionId, token)
+      clearInterval(pollRef.current)
+      localStorage.removeItem(`kk_manager_token_${stage1SessionId}`)
+      setDeleted(true)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   async function saveEmail(e) {
     e.preventDefault()
     setSavingEmail(true)
@@ -80,6 +101,19 @@ export default function ManagerPage() {
           <p className="text-sm text-parchment-500">
             This dashboard can only be opened from the browser where the interview
             setup was completed. Please return to the device you used for Stage 1.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (deleted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-6">
+        <div className="max-w-md text-center animate-page-in">
+          <h2 className="font-display text-xl text-ink-heading mb-2">Data Deleted</h2>
+          <p className="text-sm text-parchment-500">
+            All data for this handover has been permanently deleted.
           </p>
         </div>
       </div>
@@ -185,6 +219,21 @@ export default function ManagerPage() {
           {emailNotice && <p className="mt-2 text-xs text-keeper-500">{emailNotice}</p>}
           <p className="mt-2 text-xs text-parchment-400">
             We'll send a private download link to this address when the handover is ready.
+          </p>
+        </div>
+
+        {/* Danger zone — right to erasure */}
+        <div className="mt-6 pt-4 border-t border-parchment-200">
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            className="text-sm text-red-600 hover:text-red-700 transition-colors disabled:opacity-60"
+          >
+            {deleting ? 'Deleting…' : 'Delete all data for this handover'}
+          </button>
+          <p className="mt-1 text-xs text-parchment-400">
+            Permanently removes both interviews, the profile, the document, and the
+            transcripts. Use once the handover has been delivered.
           </p>
         </div>
       </div>

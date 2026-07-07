@@ -182,7 +182,7 @@ Postgres/Redis persistence + checkpointing + stateless rehydration (1.3) · hist
 - ✅ **Slice 4** — document bytes to object storage (local/S3/R2) + durable document registry; downloads survive restart and work across workers.
 - ✅ **Slice 5** — auto-trigger generation on Stage 2 completion (done in Phase 0) + email delivery of a tokenised link with a manager digest; console/SMTP backends; dashboard email capture.
 - ✅ Deploy config: `.env.example`, `docs/PHASE1_DEPLOYMENT.md`, Railway health-check path fixed to `/api/health`.
-- ⏳ **Deferred to Phase 1b:** GDPR consent screen (2.6) and the deletion endpoint + retention TTLs (4.3) — the persistence layer they depend on now exists.
+- ✅ **Phase 1b** — GDPR consent screen (2.6): employee consent screen + server-side gate recording `consent_given_at`. Right to erasure (4.3): manager-token-gated `DELETE /api/manager/{id}` cascading sessions, profile, documents (blob + metadata), conversation checkpoints and tokens, with a dashboard control. Retention (4.3): `DATA_RETENTION_DAYS` + `scripts/purge_expired.py` for durable profiles (Redis state already TTL'd).
 
 ### Phase 2 — Interview intelligence (Weeks 3–5)
 Entity inventory + entity-aware questions + block coverage gate (2.1) · information-gain follow-up classifier (2.2) · per-block micro-summaries (2.3) · turn budget + multi-sitting resume (2.3) · progress UI (2.3) · Stage 1 context ingestion & question skipping (2.5) · editable profile review form (2.5) · employee-aware gate + inferred supporting blocks (2.5) · SSE streaming + concurrent classifiers + prompt caching (4.4).

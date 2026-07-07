@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 72
     stage1_to_stage2_link_ttl_hours: int = 168
 
+    # Retention: durable Postgres profiles are purged after this many days
+    # (Redis session/token state expires via the TTLs above). Right-to-erasure
+    # deletion is immediate and independent of this backstop.
+    data_retention_days: int = 90
+
     # Storage
     # "memory"     — in-process (dev/tests; lost on restart)
     # "persistent" — Redis for session state/tokens + Postgres for profiles

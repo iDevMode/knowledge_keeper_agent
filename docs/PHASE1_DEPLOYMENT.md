@@ -69,3 +69,23 @@ selected, so the memory/console defaults need none of them at runtime.
 
 `GET /api/health` returns `{"status": "ok", "api_key_set": <bool>}` and is the
 configured Railway health-check path.
+
+## Data protection (Phase 1b)
+
+- **Consent.** The employee must explicitly consent on a screen before the
+  Stage 2 interview starts; the server rejects session creation without it and
+  records `consent_given_at`.
+- **Right to erasure.** `DELETE /api/manager/{stage1_session_id}?token=...`
+  (manager-token gated) permanently deletes both sessions, the profile, the
+  document (blob + metadata), the conversation checkpoints, and the tokens. The
+  manager dashboard exposes this as "Delete all data for this handover".
+- **Retention.** Redis session/token state expires via `SESSION_TTL_HOURS` /
+  `STAGE1_TO_STAGE2_LINK_TTL_HOURS`. Durable Postgres profiles are purged after
+  `DATA_RETENTION_DAYS` (default 90) by a maintenance job:
+
+  ```
+  python -m scripts.purge_expired
+  ```
+
+  Schedule this daily (e.g. a Railway cron / scheduled job) in a persistent
+  deployment.

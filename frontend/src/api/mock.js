@@ -169,7 +169,7 @@ export async function createStage1Session() {
   return { session_id: sessionId, message: greeting }
 }
 
-export async function createStage2Session(inviteToken) {
+export async function createStage2Session(inviteToken, _consentAcknowledged = true) {
   await delay(800)
   const sessionId = createSession(2, inviteToken)
   const greeting = `Hi there. Thanks for agreeing to take part in this knowledge capture session — I really appreciate your time.\n\nThis conversation is designed to help capture the important knowledge you carry in your role, so that your team and your successor have the best possible foundation going forward. There are no right or wrong answers — I'm just here to listen and ask the right questions.\n\nEverything you share will be used to create a handover document. You'll have the opportunity to flag anything as confidential.\n\nShall we begin?`
@@ -429,6 +429,13 @@ export async function setDeliveryEmail(stage1SessionId, token, email) {
   await delay(400)
   _deliveryEmails[stage1SessionId] = email
   return { ok: true, emailed: Boolean(_managerDocs[stage1SessionId]) }
+}
+
+export async function deleteEngagement(stage1SessionId) {
+  await delay(500)
+  delete _managerDocs[stage1SessionId]
+  delete _deliveryEmails[stage1SessionId]
+  return { ok: true, deleted: true }
 }
 
 export function getDownloadUrl(documentId) {
