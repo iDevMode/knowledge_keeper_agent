@@ -516,11 +516,18 @@ def corrections_node(state: Stage1State) -> Dict[str, Any]:
         f"The manager has reviewed the Role Intelligence Profile and provided corrections:\n\n"
         f'"{corrections}"\n\n'
         f"Here is the current profile:\n{profile_json}\n\n"
-        "Apply the corrections and return the updated profile as valid JSON."
+        "Apply the corrections and return the updated profile as valid JSON. "
+        "The full interview conversation is included above — use it to resolve "
+        "any reference the manager makes to something discussed earlier. Change "
+        "only what the correction asks for; leave every other field as it is."
     )
 
+    # The interview transcript is included so corrections that refer back to the
+    # conversation ("change it to what I said about the CFO") can be resolved.
+    # Without it the model saw only the profile JSON and the correction text.
     messages = [
         SystemMessage(content=STAGE1_SYSTEM_PROMPT),
+        *state["conversation_history"],
         SystemMessage(content=instruction),
     ]
 

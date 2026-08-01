@@ -310,14 +310,15 @@ def send_message(session_id: str, request: SendMessageRequest):
     if not instance:
         raise HTTPException(status_code=404, detail="No active graph for session")
 
-    # Check if session is already complete
-    snapshot = instance.graph.get_state(instance.config)
-    current_state = snapshot.values
-    if current_state.get("session_complete"):
-        raise HTTPException(status_code=400, detail="Session is already complete")
-
     lock = _registry.get_lock(session_id)
     with lock:
+        # Read the completion flag INSIDE the lock. Checking before acquiring it
+        # let two near-simultaneous messages both observe an incomplete session
+        # and both resume the graph.
+        snapshot = instance.graph.get_state(instance.config)
+        if snapshot.values.get("session_complete"):
+            raise HTTPException(status_code=400, detail="Session is already complete")
+
         state = _run_graph_resume(instance, request.message)
 
     agent_message = state.get("last_agent_message", "")
@@ -326,18 +327,18 @@ def send_message(session_id: str, request: SendMessageRequest):
     response = MessageResponse(message=agent_message, session_complete=session_complete)
 
     if session_complete and instance.stage == 1:
-        profile = state.get("role_intelligence_profile")
-        if profile:
-            profile_obj = profile if hasattr(profile, "model_dump") else None
-            if profile_obj:
-                store.store_profile(session_id, profile_obj)
-                response.profile = profile_obj.model_dump()
-            else:
-                # profile is already a dict
-                from models.role_intelligence_profile import RoleIntelligenceProfile
-                profile_validated = RoleIntelligenceProfile.model_validate(profile)
-                store.store_profile(session_id, profile_validated)
-                response.profile = profile if isinstance(profile, dict) else profile_validated.model_dump()
+        # finalise_node is the single writer of the confirmed profile — it runs
+        # only after the manager confirms, so it is the correct place for that
+        # decision. This endpoint previously stored it a second time, which also
+        # meant an unconfirmed profile could be persisted on paths that complete
+        # without confirmation. Here we only echo what was stored.
+        profile = store.get_profile(session_id)
+        if profile is not None:
+            response.profile = profile.model_dump()
+        else:
+            logger.warning(
+                "session=%s stage=1 completed without a confirmed profile", session_id
+            )
         store.update_session(session_id, {"session_complete": True})
         on_stage1_complete(session_id)
 
