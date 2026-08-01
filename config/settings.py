@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     primary_model: str = "claude-sonnet-4-6"
     classifier_model: str = "claude-haiku-4-5-20251001"
 
+    # Persistence (review finding H3)
+    # When unset, all state is held in-process: sessions, LangGraph checkpoints
+    # and generated documents. That works for a single worker but does not
+    # survive a restart, so every redeploy destroys in-flight interviews.
+    # Required in production — see validate_for_production.
+    database_url: str = ""
+
     # Session
     session_ttl_hours: int = 72
     # Must not exceed session_ttl_hours — the employee link cannot outlive the
@@ -58,6 +65,13 @@ class Settings(BaseSettings):
         errors = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY is not set")
+        if not self.database_url and self.environment != "development":
+            # Without it every restart destroys in-flight interviews: sessions,
+            # LangGraph checkpoints and generated documents all live in process
+            # memory.
+            errors.append(
+                "DATABASE_URL is not set — sessions would not survive a restart"
+            )
         if not self.api_secret_key and self.environment != "development":
             # Session tokens are signed with this. Without it the app falls back
             # to a per-process key, so every restart silently invalidates every

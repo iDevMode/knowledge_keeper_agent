@@ -1,9 +1,12 @@
+import logging
 import time
 import uuid
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 from models.role_intelligence_profile import RoleIntelligenceProfile
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -15,6 +18,7 @@ class SessionStore(Protocol):
     def get_linked_session(self, session_id: str) -> Optional[str]: ...
     def store_profile(self, session_id: str, profile: RoleIntelligenceProfile) -> None: ...
     def get_profile(self, session_id: str) -> Optional[RoleIntelligenceProfile]: ...
+    def sweep_expired(self) -> int: ...
 
 
 class InMemorySessionStore:
@@ -88,11 +92,35 @@ class InMemorySessionStore:
         return len(expired)
 
 
-_store: InMemorySessionStore | None = None
+_store: SessionStore | None = None
 
 
-def get_session_store() -> InMemorySessionStore:
+def get_session_store() -> SessionStore:
+    """Return the process-wide session store.
+
+    Postgres-backed when DATABASE_URL is set, in-process otherwise. The
+    in-process path keeps local development and the test suite free of any
+    infrastructure; production refuses to start without DATABASE_URL, the same
+    way it refuses without API_SECRET_KEY — see Settings.validate_for_production.
+    """
     global _store
     if _store is None:
-        _store = InMemorySessionStore()
+        if settings.database_url:
+            # Imported lazily so psycopg is not required to run in-memory.
+            from api.postgres_store import PostgresSessionStore
+
+            _store = PostgresSessionStore()
+            logger.info("session store: postgres")
+        else:
+            _store = InMemorySessionStore()
+            logger.warning(
+                "session store: in-process — sessions will not survive a restart. "
+                "Set DATABASE_URL to persist them."
+            )
     return _store
+
+
+def reset_session_store() -> None:
+    """Drop the cached store. Used by tests to switch backends."""
+    global _store
+    _store = None
