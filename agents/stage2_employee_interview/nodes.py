@@ -283,8 +283,10 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
                 session_id, flag.flag_type, flag.severity, block,
             )
 
-        existing_flags = list(state.get("risk_flags", []))
-        return {"risk_flags": existing_flags + new_flags}
+        # Return ONLY the new flags — the operator.add reducer on risk_flags
+        # appends them. Returning existing + new would double-count, and under
+        # parallel execution a read-modify-write here would lose flags.
+        return {"risk_flags": new_flags}
 
     except ClassifierParseError as e:
         # Risk detection is a headline feature; an unreadable response must not
@@ -297,6 +299,17 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
     except Exception as e:
         logger.warning("session=%s Risk flag classifier failed: %s — returning unchanged", session_id, e)
         return {}
+
+
+def classifiers_complete_node(state: Stage2State) -> Dict[str, Any]:
+    """Join point for the two parallel classifier branches.
+
+    risk_flag_classifier and followup_classifier both fan out from
+    process_answer and run concurrently. This node exists so the graph has an
+    explicit fan-in: it runs once both branches have completed, and routing to
+    the next question happens from here. It writes no state.
+    """
+    return {}
 
 
 def followup_classifier_node(state: Stage2State) -> Dict[str, Any]:

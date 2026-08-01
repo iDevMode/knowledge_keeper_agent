@@ -4,6 +4,7 @@ from langgraph.graph import END, StateGraph
 from agents.stage2_employee_interview.nodes import (
     advance_question_node,
     ask_question_node,
+    classifiers_complete_node,
     followup_classifier_node,
     followup_question_node,
     greeting_node,
@@ -27,6 +28,7 @@ def build_stage2_graph(checkpointer=None):
     builder.add_node("ask_question", ask_question_node)
     builder.add_node("process_answer", process_answer_node)
     builder.add_node("risk_flag_classifier", risk_flag_classifier_node)
+    builder.add_node("classifiers_complete", classifiers_complete_node)
     builder.add_node("followup_classifier", followup_classifier_node)
     builder.add_node("followup_question", followup_question_node)
     builder.add_node("advance_question", advance_question_node)
@@ -41,15 +43,22 @@ def build_stage2_graph(checkpointer=None):
     # greeting -> process_answer (waiting for first user input since greeting contains q0)
     builder.add_edge("greeting", "process_answer")
 
-    # process_answer -> risk_flag_classifier
+    # process_answer fans out to BOTH classifiers, which run concurrently in the
+    # same super-step. Risk detection previously sat in series ahead of the
+    # follow-up classifier, adding a Haiku round-trip to the latency of every
+    # employee turn. CLAUDE.md Principle 5 specifies a parallel branch that does
+    # not block the main conversation flow.
     builder.add_edge("process_answer", "risk_flag_classifier")
+    builder.add_edge("process_answer", "followup_classifier")
 
-    # risk_flag_classifier -> followup_classifier
-    builder.add_edge("risk_flag_classifier", "followup_classifier")
+    # Both branches join here, so routing waits for the follow-up decision while
+    # risk classification has already run alongside it rather than before it.
+    builder.add_edge("risk_flag_classifier", "classifiers_complete")
+    builder.add_edge("followup_classifier", "classifiers_complete")
 
-    # followup_classifier -> followup_question OR advance_question
+    # classifiers_complete -> followup_question OR advance_question
     builder.add_conditional_edges(
-        "followup_classifier",
+        "classifiers_complete",
         route_after_followup_classifier,
         {"followup_question": "followup_question", "advance_question": "advance_question"},
     )

@@ -22,6 +22,10 @@ class Stage2State(TypedDict):
     pending_followup: Optional[str]
     answers: Dict[str, Any]  # keyed by "{block}.{index}"
     conversation_history: Annotated[List[BaseMessage], operator.add]
-    risk_flags: List[RiskFlag]
+    # Append-only via a reducer. risk_flag_classifier runs as a parallel branch
+    # alongside followup_classifier, so a plain list would let the two concurrent
+    # writes in the same super-step clobber each other. Nodes must return ONLY
+    # their new flags and let the reducer append.
+    risk_flags: Annotated[List[RiskFlag], operator.add]
     last_agent_message: str
     session_complete: bool
