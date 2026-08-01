@@ -7,6 +7,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from agents.parsing import ClassifierParseError, extract_json
 from agents.stage1_business_interview.prompts import (
     BLOCK_QUESTIONS,
     FIELD_LABELS,
@@ -200,10 +201,21 @@ Respond with ONLY a JSON object (no markdown, no explanation):
     try:
         llm = _get_classifier_llm()
         response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = json.loads(response.content.strip())
+        result = extract_json(response.content)
+
+        if not isinstance(result, dict):
+            raise ClassifierParseError(f"expected a JSON object, got {type(result).__name__}")
 
         if result.get("needs_followup", False):
             return {"pending_followup": result.get("suggested_followup", "")}
+        return {"pending_followup": None}
+    except ClassifierParseError as e:
+        # Distinct from "the model said no": this is us failing to read the
+        # answer, which silently disables follow-ups if it goes unnoticed.
+        logger.error(
+            "session=%s stage=1 followup classifier response UNPARSEABLE: %s "
+            "— defaulting to no followup", session_id, e,
+        )
         return {"pending_followup": None}
     except Exception as e:
         # Default to no follow-up on classifier failure

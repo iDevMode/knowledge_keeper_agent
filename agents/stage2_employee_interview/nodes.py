@@ -5,6 +5,7 @@ from typing import Any, Dict
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from agents.parsing import ClassifierParseError, extract_json
 from agents.stage2_employee_interview.prompts import (
     BLOCK_QUESTIONS,
     CLOSING_MESSAGE,
@@ -238,10 +239,13 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
     try:
         llm = _get_classifier_llm()
         response = llm.invoke([HumanMessage(content=prompt)])
-        raw = response.content.strip()
 
-        flags_data = json.loads(raw)
+        flags_data = extract_json(response.content)
         if not isinstance(flags_data, list):
+            logger.warning(
+                "session=%s stage=2 risk classifier returned %s, expected a list "
+                "— treating as no flags", session_id, type(flags_data).__name__,
+            )
             flags_data = []
 
         new_flags = []
@@ -263,6 +267,14 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
         existing_flags = list(state.get("risk_flags", []))
         return {"risk_flags": existing_flags + new_flags}
 
+    except ClassifierParseError as e:
+        # Risk detection is a headline feature; an unreadable response must not
+        # look the same in the logs as "no risks in this answer".
+        logger.error(
+            "session=%s stage=2 risk classifier response UNPARSEABLE: %s "
+            "— no flags recorded for this answer", session_id, e,
+        )
+        return {}
     except Exception as e:
         logger.warning("session=%s Risk flag classifier failed: %s — returning unchanged", session_id, e)
         return {}
@@ -322,10 +334,19 @@ Respond with ONLY a JSON object (no markdown, no explanation):
     try:
         llm = _get_classifier_llm()
         response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = json.loads(response.content.strip())
+        result = extract_json(response.content)
+
+        if not isinstance(result, dict):
+            raise ClassifierParseError(f"expected a JSON object, got {type(result).__name__}")
 
         if result.get("needs_followup", False):
             return {"pending_followup": result.get("suggested_followup", "")}
+        return {"pending_followup": None}
+    except ClassifierParseError as e:
+        logger.error(
+            "session=%s stage=2 followup classifier response UNPARSEABLE: %s "
+            "— defaulting to no followup", session_id, e,
+        )
         return {"pending_followup": None}
     except Exception as e:
         logger.warning("session=%s Followup classifier failed: %s — defaulting to no followup", session_id, e)
