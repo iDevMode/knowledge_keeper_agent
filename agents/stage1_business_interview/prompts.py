@@ -110,6 +110,28 @@ Extract and synthesise all answers into the structured format. For any informati
 provided, use null/None. For agent_flags, auto-generate appropriate flags based on the departure
 context (e.g. involuntary departure, short notice period, no overlap, sensitive departure, etc.).
 
+## KNOWLEDGE PRIORITY VALUES — EXACT STRINGS REQUIRED
+
+priority_1, priority_2, priority_3 and every entry in supporting_categories MUST be one of
+these exact nine values, copied verbatim. Do not paraphrase, retitle, or pluralise them —
+these strings are used to select which interview blocks run in Stage 2, and any other value
+is discarded, meaning that priority is never covered with the employee.
+
+- client_stakeholder_relationships
+- internal_processes_workflows
+- technical_systems_tools
+- decision_making_logic
+- team_dynamics_management
+- supplier_vendor_relationships
+- regulatory_compliance
+- undocumented_workarounds
+- strategic_context
+
+Map the manager's numbered selection to these values (1 -> client_stakeholder_relationships,
+2 -> internal_processes_workflows, 3 -> technical_systems_tools, 4 -> decision_making_logic,
+5 -> team_dynamics_management, 6 -> supplier_vendor_relationships, 7 -> regulatory_compliance,
+8 -> undocumented_workarounds, 9 -> strategic_context).
+
 Return the profile as a valid JSON object matching the RoleIntelligenceProfile schema exactly.
 """
 

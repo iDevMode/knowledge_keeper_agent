@@ -23,6 +23,7 @@ from config.constants import (
     STAGE2_BLOCK_QUESTION_COUNTS,
     STAGE2_CLOSING_QUESTION_COUNT,
     STAGE2_ROLE_ORIENTATION_QUESTION_COUNT,
+    BlockDepth,
     KnowledgeBlock,
 )
 from config.settings import settings
@@ -76,7 +77,23 @@ def load_profile_node(state: Stage2State) -> Dict[str, Any]:
     block_order = [block.value for block in ordered_blocks]
     block_depths = {block.value: depth.value for block, depth in depth_map.items()}
 
-    logger.info("session=%s stage=2 block_order=%s", session_id, block_order)
+    # undocumented_workarounds is always appended regardless of the manager's
+    # ranking, so a block_order of just that one block means every ranked
+    # priority failed to resolve — the interview would cover none of what the
+    # manager actually asked for. Surface it rather than running a hollow session.
+    full_depth_blocks = [b for b, d in depth_map.items() if d == BlockDepth.FULL]
+    if len(full_depth_blocks) <= 1:
+        logger.error(
+            "session=%s stage=2 NO ranked priorities resolved from profile "
+            "(priority_1=%r priority_2=%r priority_3=%r) — Stage 2 would cover "
+            "only undocumented_workarounds",
+            session_id, profile.priority_1, profile.priority_2, profile.priority_3,
+        )
+
+    logger.info(
+        "session=%s stage=2 block_order=%s depths=%s",
+        session_id, block_order, block_depths,
+    )
 
     return {
         "profile": profile,
