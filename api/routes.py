@@ -477,11 +477,18 @@ def download_document(document_id: str):
 if _FRONTEND_DIST.exists():
     _index_html = (_FRONTEND_DIST / "index.html").read_text()
 
+    _FRONTEND_DIST_RESOLVED = _FRONTEND_DIST.resolve()
+
     @app.get("/{full_path:path}")
     def serve_spa(full_path: str):
-        # If the path maps to a real file in dist, serve it
-        file_path = _FRONTEND_DIST / full_path
-        if full_path and file_path.exists() and file_path.is_file():
-            return FileResponse(str(file_path))
+        # Only ever serve files that resolve INSIDE the dist directory. Starlette
+        # normalises ".." out of request paths today, so this is defence in depth
+        # — but the containment check must live here, not depend on an upstream
+        # layer we do not control (a proxy forwarding raw dot segments, a
+        # different ASGI server, or a direct call would all bypass it).
+        if full_path:
+            candidate = (_FRONTEND_DIST_RESOLVED / full_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(_FRONTEND_DIST_RESOLVED):
+                return FileResponse(str(candidate))
         # Otherwise serve index.html for client-side routing
         return HTMLResponse(_index_html)
