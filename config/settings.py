@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         super().__init__(**kwargs)
         # Fallback: read directly from os.environ if pydantic-settings missed them
         # This handles deployment platforms where env var injection timing varies
-        for field_name in self.model_fields:
+        for field_name in type(self).model_fields:
             env_name = field_name.upper()
             env_val = os.environ.get(env_name)
             if env_val and not getattr(self, field_name, None):
@@ -46,8 +46,11 @@ class Settings(BaseSettings):
 
     def validate_for_production(self) -> None:
         """Check critical settings are configured. Call at startup."""
-        key_preview = f"{self.anthropic_api_key[:8]}..." if self.anthropic_api_key else "(empty)"
-        print(f"[STARTUP] environment={self.environment} api_key={key_preview} origins={self.allowed_origins}", file=sys.stderr)
+        print(
+            f"[STARTUP] environment={self.environment} "
+            f"api_key={'set' if self.anthropic_api_key else 'MISSING'}",
+            file=sys.stderr,
+        )
         errors = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY is not set")
