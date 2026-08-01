@@ -81,7 +81,13 @@ def _restart() -> TestClient:
     sm_mod.reset_session_store()
     doc_mod.reset_document_store()
     routes_mod.reset_checkpointer()
+    routes_mod.reset_session_locks()
     routes_mod._registry = routes_mod.GraphRegistry()
+
+    if TEST_DATABASE_URL:
+        from api.postgres_store import reset_shared_pool
+
+        reset_shared_pool()
 
     return TestClient(routes_mod.app)
 

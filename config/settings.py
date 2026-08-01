@@ -17,6 +17,16 @@ class Settings(BaseSettings):
     # Required in production — see validate_for_production.
     database_url: str = ""
 
+    # Connection budget per worker:
+    #   db_pool_size        short queries — session store and document store
+    #   db_lock_pool_size   advisory locks, each held for a whole interview turn
+    #   db_pool_size        the LangGraph checkpointer's own pool
+    # Total per worker is roughly 2 * db_pool_size + db_lock_pool_size, and it
+    # multiplies by WEB_CONCURRENCY. Managed Postgres often caps around 100, so
+    # raising worker count without lowering these is how you exhaust it.
+    db_pool_size: int = 5
+    db_lock_pool_size: int = 10
+
     # Session
     session_ttl_hours: int = 72
     # Must not exceed session_ttl_hours — the employee link cannot outlive the
@@ -65,6 +75,20 @@ class Settings(BaseSettings):
         errors = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY is not set")
+        workers = os.environ.get("WEB_CONCURRENCY", "1")
+        try:
+            worker_count = int(workers)
+        except ValueError:
+            worker_count = 1
+        if worker_count > 1 and not self.database_url:
+            # Each worker would hold its own sessions, checkpoints and
+            # documents, so a session created by one is invisible to the rest
+            # and the next message 404s — intermittently, depending on which
+            # worker the request lands on.
+            errors.append(
+                f"WEB_CONCURRENCY is {worker_count} but DATABASE_URL is not set — "
+                f"workers cannot share session state"
+            )
         if not self.database_url and self.environment != "development":
             # Without it every restart destroys in-flight interviews: sessions,
             # LangGraph checkpoints and generated documents all live in process

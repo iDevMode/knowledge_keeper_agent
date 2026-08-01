@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -121,7 +122,9 @@ def _build_checkpointer() -> Any:
     pool = ConnectionPool(
         settings.database_url,
         min_size=1,
-        max_size=10,
+        # Its own pool: PostgresSaver requires autocommit and dict_row on every
+        # connection, which the shared store pool must not have.
+        max_size=settings.db_pool_size,
         timeout=10,
         # PostgresSaver requires both of these on every connection it uses.
         kwargs={"autocommit": True, "row_factory": dict_row},
@@ -131,6 +134,44 @@ def _build_checkpointer() -> Any:
     saver.setup()
     logger.info("checkpointer: postgres")
     return saver
+
+
+_session_locks: Optional[Any] = None
+
+
+def _get_cross_process_locks() -> Optional[Any]:
+    """Postgres advisory locks, or None when running in-process only."""
+    global _session_locks
+    if _session_locks is None and settings.database_url:
+        from api.postgres_store import PostgresSessionLocks
+
+        _session_locks = PostgresSessionLocks()
+    return _session_locks
+
+
+def reset_session_locks() -> None:
+    """Drop the cached lock pool. Used by tests to switch backends."""
+    global _session_locks
+    _session_locks = None
+
+
+@contextmanager
+def session_lock(session_id: str) -> Any:
+    """Serialise a session's graph run, across workers as well as threads.
+
+    The in-process lock is taken first and always: it is free, and it absorbs
+    same-worker contention without a round trip to Postgres. The advisory lock
+    then covers the case the in-process one cannot — two uvicorn workers holding
+    requests for the same session, which is exactly what the single-worker
+    deployment pin existed to prevent.
+    """
+    locks = _get_cross_process_locks()
+    with _registry.get_lock(session_id):
+        if locks is None:
+            yield
+        else:
+            with locks.lock(session_id):
+                yield
 
 
 def get_checkpointer() -> Any:
@@ -798,8 +839,7 @@ def send_message(session_id: str, request: SendMessageRequest):
     if not instance:
         raise HTTPException(status_code=404, detail="No active graph for session")
 
-    lock = _registry.get_lock(session_id)
-    with lock:
+    with session_lock(session_id):
         # Read the completion flag INSIDE the lock. Checking before acquiring it
         # let two near-simultaneous messages both observe an incomplete session
         # and both resume the graph.

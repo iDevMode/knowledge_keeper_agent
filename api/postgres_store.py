@@ -15,9 +15,12 @@ rows. That matches the in-memory semantics exactly, which is what lets one
 contract test suite cover both.
 """
 
+import hashlib
 import logging
+import threading
 import time
-from typing import Any, Dict, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, Optional
 
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -74,24 +77,60 @@ CREATE TABLE IF NOT EXISTS kk_generation_errors (
 """
 
 
+_shared_pool: Optional[ConnectionPool] = None
+_pool_guard = threading.Lock()
+
+
+def get_shared_pool() -> ConnectionPool:
+    """One pool per worker for short store queries.
+
+    The session store and document store used to open a pool each. With the
+    checkpointer and the advisory locks that made four pools per worker, so two
+    workers could demand 80 connections against a cap that is commonly 100.
+    They issue short queries and share happily.
+    """
+    global _shared_pool
+    if _shared_pool is None:
+        with _pool_guard:
+            if _shared_pool is None:
+                _shared_pool = ConnectionPool(
+                    settings.database_url,
+                    min_size=1,
+                    max_size=settings.db_pool_size,
+                    # Fail fast on a bad DATABASE_URL rather than blocking every
+                    # request until some far-off timeout.
+                    timeout=10,
+                    open=True,
+                )
+    return _shared_pool
+
+
+def reset_shared_pool() -> None:
+    """Close and drop the shared pool. Used by tests simulating a restart."""
+    global _shared_pool
+    if _shared_pool is not None:
+        _shared_pool.close()
+        _shared_pool = None
+
+
+def _pool_for(conninfo: Optional[str], pool: Optional[ConnectionPool],
+              max_size: int) -> ConnectionPool:
+    """A caller-supplied pool, a dedicated one for an explicit DSN, or the shared one."""
+    if pool is not None:
+        return pool
+    if conninfo:
+        return ConnectionPool(conninfo, min_size=1, max_size=max_size, timeout=10, open=True)
+    return get_shared_pool()
+
+
 class PostgresSessionStore:
     """SessionStore backed by Postgres. See the protocol in session_manager."""
 
     def __init__(self, conninfo: Optional[str] = None, ttl_hours: float | None = None,
                  pool: Optional[ConnectionPool] = None):
         self._ttl_seconds = (ttl_hours or settings.session_ttl_hours) * 3600
-        if pool is not None:
-            self._pool = pool
-        else:
-            self._pool = ConnectionPool(
-                conninfo or settings.database_url,
-                min_size=1,
-                max_size=10,
-                # Fail fast on a bad DATABASE_URL rather than blocking every
-                # request until some far-off timeout.
-                timeout=10,
-                open=True,
-            )
+        self._owns_pool = pool is None and bool(conninfo)
+        self._pool = _pool_for(conninfo, pool, settings.db_pool_size)
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
@@ -217,7 +256,58 @@ class PostgresSessionStore:
         return len(expired)
 
     def close(self) -> None:
-        self._pool.close()
+        # Only close a pool we created. The shared one outlives any single
+        # store and closing it here would break the others.
+        if self._owns_pool:
+            self._pool.close()
+
+
+def advisory_key(session_id: str) -> int:
+    """A stable signed 64-bit key for pg_advisory_lock.
+
+    Derived in Python rather than with Postgres hashtext() so the value does not
+    depend on the server's hashing, which is not a documented stable interface.
+    """
+    digest = hashlib.blake2b(session_id.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+class PostgresSessionLocks:
+    """Cross-process serialisation of a session's graph run.
+
+    In-process threading locks only serialise within one worker. Once more than
+    one uvicorn worker exists, two requests for the same session land in
+    different processes and can drive the same LangGraph thread concurrently,
+    interleaving checkpoint writes. An advisory lock is held on the connection
+    for the duration of the run, so the second worker waits.
+    """
+
+    def __init__(self, conninfo: Optional[str] = None,
+                 pool: Optional[ConnectionPool] = None):
+        # A dedicated pool, NOT the shared one: a lock connection is held for
+        # the whole graph run, so borrowing from the short-query pool would
+        # starve it whenever a few interviews were mid-turn.
+        self._owns_pool = pool is None
+        self._pool = pool or ConnectionPool(
+            conninfo or settings.database_url,
+            min_size=1, max_size=settings.db_lock_pool_size, timeout=10, open=True,
+        )
+
+    @contextmanager
+    def lock(self, session_id: str) -> Iterator[None]:
+        key = advisory_key(session_id)
+        with self._pool.connection() as conn:
+            conn.execute("SELECT pg_advisory_lock(%s)", (key,))
+            try:
+                yield
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
+
+    def close(self) -> None:
+        # Only close a pool we created. The shared one outlives any single
+        # store and closing it here would break the others.
+        if self._owns_pool:
+            self._pool.close()
 
 
 class PostgresDocumentStore:
@@ -226,13 +316,8 @@ class PostgresDocumentStore:
     def __init__(self, conninfo: Optional[str] = None, ttl_hours: float | None = None,
                  pool: Optional[ConnectionPool] = None):
         self._ttl_seconds = (ttl_hours or settings.session_ttl_hours) * 3600
-        if pool is not None:
-            self._pool = pool
-        else:
-            self._pool = ConnectionPool(
-                conninfo or settings.database_url,
-                min_size=1, max_size=10, timeout=10, open=True,
-            )
+        self._owns_pool = pool is None and bool(conninfo)
+        self._pool = _pool_for(conninfo, pool, settings.db_pool_size)
         with self._pool.connection() as conn:
             conn.execute(SCHEMA)
 
@@ -354,4 +439,7 @@ class PostgresDocumentStore:
         return removed
 
     def close(self) -> None:
-        self._pool.close()
+        # Only close a pool we created. The shared one outlives any single
+        # store and closing it here would break the others.
+        if self._owns_pool:
+            self._pool.close()
