@@ -28,41 +28,83 @@ def reset_singletons():
 
 
 class TestGraphRegistryEviction:
-    def test_idle_instances_are_evicted(self):
+    """After H3 the registry caches locks, not graphs.
+
+    Graphs are compiled once per stage and rebuilt on demand against the shared
+    checkpointer, so there is no per-session object to evict — only the
+    per-session lock, which would otherwise grow for the life of the process.
+    """
+
+    def _seeded_registry(self, *session_ids):
+        from api.session_manager import get_session_store
+
+        store = get_session_store()
         registry = routes_mod.GraphRegistry()
-        registry.create_stage1("old-session")
-        registry.create_stage1("fresh-session")
+        created = {}
+        for name in session_ids:
+            session_id = store.create_session(stage=1)
+            created[name] = session_id
+            registry.create_stage1(session_id)
+        return registry, created
 
-        # Age one instance past the retention window.
-        registry._last_used["old-session"] = time.time() - 10_000
+    def test_idle_locks_are_released(self):
+        registry, ids = self._seeded_registry("old", "fresh")
+        registry.get_lock(ids["old"])
+        registry.get_lock(ids["fresh"])
 
-        evicted = registry.sweep_idle(max_idle_seconds=3600)
+        registry._last_used[ids["old"]] = time.time() - 10_000
 
-        assert evicted == 1
-        assert registry.get("old-session") is None
-        assert registry.get("fresh-session") is not None
+        assert registry.sweep_idle(max_idle_seconds=3600) == 1
+        assert ids["old"] not in registry._locks
+        assert ids["fresh"] in registry._locks
 
     def test_eviction_releases_the_lock_too(self):
-        registry = routes_mod.GraphRegistry()
-        registry.create_stage1("s1")
-        registry.get_lock("s1")
-        registry._last_used["s1"] = time.time() - 10_000
+        registry, ids = self._seeded_registry("s1")
+        registry.get_lock(ids["s1"])
+        registry._last_used[ids["s1"]] = time.time() - 10_000
 
         registry.sweep_idle(max_idle_seconds=3600)
 
-        assert "s1" not in registry._locks
-        assert "s1" not in registry._last_used
+        assert ids["s1"] not in registry._locks
+        assert ids["s1"] not in registry._last_used
 
     def test_activity_defers_eviction(self):
-        registry = routes_mod.GraphRegistry()
-        registry.create_stage1("s1")
-        registry._last_used["s1"] = time.time() - 10_000
+        registry, ids = self._seeded_registry("s1")
+        registry._last_used[ids["s1"]] = time.time() - 10_000
 
         # Accessing the session marks it in use again.
-        registry.get("s1")
+        registry.get(ids["s1"])
 
         assert registry.sweep_idle(max_idle_seconds=3600) == 0
-        assert registry.get("s1") is not None
+
+    def test_a_swept_session_is_still_servable(self):
+        """The point of H3: eviction must not strand a live interview.
+
+        Previously sweeping dropped the only copy of the graph, so the session
+        became unreachable and every message 404'd. Now the graph is rebuilt.
+        """
+        registry, ids = self._seeded_registry("s1")
+        registry.sweep_idle(max_idle_seconds=0)
+
+        assert registry.get(ids["s1"]) is not None, (
+            "a live session became unservable after its lock was released"
+        )
+
+    def test_get_reflects_the_session_store_not_a_cache(self):
+        from api.session_manager import get_session_store
+
+        registry = routes_mod.GraphRegistry()
+        session_id = get_session_store().create_session(stage=2)
+
+        # Never passed through create_stage2 — a second worker would be in
+        # exactly this position, having never seen the session created.
+        instance = registry.get(session_id)
+        assert instance is not None
+        assert instance.stage == 2
+
+    def test_unknown_session_has_no_graph(self):
+        registry = routes_mod.GraphRegistry()
+        assert registry.get("no-such-session") is None
 
 
 class TestSessionStoreSweep:

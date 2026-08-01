@@ -110,22 +110,33 @@ class TestGraphRegistry:
         assert instance.config == {"configurable": {"thread_id": "test-s2"}}
 
     def test_get_returns_instance(self):
+        # get() answers from the session store, not a process cache, so a
+        # worker can serve a session it never created (H3).
         from api.routes import GraphRegistry
+        from api.session_manager import get_session_store
+
         registry = GraphRegistry()
-        registry.create_stage1("test-s1")
-        assert registry.get("test-s1") is not None
+        session_id = get_session_store().create_session(stage=1)
+        assert registry.get(session_id) is not None
 
     def test_get_returns_none_for_unknown(self):
         from api.routes import GraphRegistry
         registry = GraphRegistry()
         assert registry.get("nonexistent") is None
 
-    def test_remove(self):
+    def test_remove_releases_the_lock_without_stranding_the_session(self):
         from api.routes import GraphRegistry
+        from api.session_manager import get_session_store
+
         registry = GraphRegistry()
-        registry.create_stage1("test-s1")
-        registry.remove("test-s1")
-        assert registry.get("test-s1") is None
+        session_id = get_session_store().create_session(stage=1)
+        registry.get_lock(session_id)
+        registry.remove(session_id)
+
+        assert session_id not in registry._locks
+        # The graph is rebuilt on demand, so removing bookkeeping must not make
+        # a live interview unreachable.
+        assert registry.get(session_id) is not None
 
     def test_per_session_locks(self):
         from api.routes import GraphRegistry

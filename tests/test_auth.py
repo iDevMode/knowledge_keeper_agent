@@ -365,10 +365,16 @@ class TestStage2CreationIsIdempotent:
         )
         assert response.status_code == 200, "the first employee session was orphaned"
 
-    def test_a_session_with_no_graph_is_replaced_rather_than_reissued(
+    def test_registry_bookkeeping_loss_does_not_strand_the_session(
         self, client, engagement
     ):
-        """Reissuing a token for a session with no graph hands out a dead link."""
+        """Before H3 this had to create a replacement session.
+
+        The graph lived only in a process dictionary, so losing it meant the
+        employee opened their link to a blank chat and every message 404'd. The
+        graph is now rebuilt from the shared checkpointer, so the same session
+        is reused and the opening question comes back with it.
+        """
         import api.routes as routes_mod
 
         routes_mod._registry.remove(engagement["stage2_id"])
@@ -384,8 +390,8 @@ class TestStage2CreationIsIdempotent:
             )
 
         assert response.status_code == 200
-        assert response.json()["session_id"] != engagement["stage2_id"]
-        assert response.json()["message"], "the employee would see a blank chat"
+        assert response.json()["session_id"] == engagement["stage2_id"]
+        assert response.json()["message"], "the opening question was lost"
 
     def test_the_reissued_token_works(self, client, engagement):
         reissued = client.post(

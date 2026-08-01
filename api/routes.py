@@ -98,6 +98,56 @@ class GenerationStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
+# ---- Checkpointer ----
+
+_checkpointer: Optional[Any] = None
+_checkpointer_guard = threading.Lock()
+
+
+def _build_checkpointer() -> Any:
+    if not settings.database_url:
+        logger.warning(
+            "checkpointer: in-process — interviews will not survive a restart. "
+            "Set DATABASE_URL to persist them."
+        )
+        return MemorySaver()
+
+    # Imported lazily so psycopg is not needed to run in-memory.
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    pool = ConnectionPool(
+        settings.database_url,
+        min_size=1,
+        max_size=10,
+        timeout=10,
+        # PostgresSaver requires both of these on every connection it uses.
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        open=True,
+    )
+    saver = PostgresSaver(pool)
+    saver.setup()
+    logger.info("checkpointer: postgres")
+    return saver
+
+
+def get_checkpointer() -> Any:
+    """The process-wide checkpointer. Postgres when configured, else in-memory."""
+    global _checkpointer
+    if _checkpointer is None:
+        with _checkpointer_guard:
+            if _checkpointer is None:
+                _checkpointer = _build_checkpointer()
+    return _checkpointer
+
+
+def reset_checkpointer() -> None:
+    """Drop the cached checkpointer. Used by tests to switch backends."""
+    global _checkpointer
+    _checkpointer = None
+
+
 # ---- GraphRegistry ----
 
 @dataclass
@@ -105,61 +155,97 @@ class GraphInstance:
     graph: Any
     config: dict
     stage: int
-    checkpointer: MemorySaver
+    checkpointer: Any
 
 
 class GraphRegistry:
-    def __init__(self):
-        self._instances: Dict[str, GraphInstance] = {}
+    """Builds graphs on demand against one shared checkpointer.
+
+    This used to cache a compiled graph AND its own private MemorySaver per
+    session in a process dictionary. That is what tied a session to the process
+    that created it: a restart lost every interview, and a second worker could
+    not serve a session the first one had started — it saw no graph and returned
+    404.
+
+    A compiled graph carries no session state; the state lives in the
+    checkpointer under thread_id. So one graph per stage is compiled once and
+    reused for every session, and which session it is serving comes from the
+    config passed at call time. Any worker can now serve any session, and an
+    interview resumes after a redeploy.
+    """
+
+    def __init__(self, checkpointer: Optional[Any] = None):
+        self._checkpointer = checkpointer
+        self._graphs: Dict[int, Any] = {}
         self._locks: Dict[str, threading.Lock] = {}
         self._last_used: Dict[str, float] = {}
+        # Guards the lock dictionary itself. Without it two requests for the
+        # same new session could each build a lock and serialise against
+        # nothing.
+        self._registry_guard = threading.Lock()
 
-    def _touch(self, session_id: str) -> None:
+    @property
+    def checkpointer(self) -> Any:
+        if self._checkpointer is None:
+            self._checkpointer = get_checkpointer()
+        return self._checkpointer
+
+    def _graph_for(self, stage: int) -> Any:
+        with self._registry_guard:
+            if stage not in self._graphs:
+                builder = build_stage1_graph if stage == 1 else build_stage2_graph
+                self._graphs[stage] = builder(checkpointer=self.checkpointer)
+            return self._graphs[stage]
+
+    def _instance(self, session_id: str, stage: int) -> GraphInstance:
         self._last_used[session_id] = time.time()
+        return GraphInstance(
+            graph=self._graph_for(stage),
+            config={"configurable": {"thread_id": session_id}},
+            stage=stage,
+            checkpointer=self.checkpointer,
+        )
 
     def create_stage1(self, session_id: str) -> GraphInstance:
-        checkpointer = MemorySaver()
-        graph = build_stage1_graph(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": session_id}}
-        instance = GraphInstance(graph=graph, config=config, stage=1, checkpointer=checkpointer)
-        self._instances[session_id] = instance
-        self._touch(session_id)
-        return instance
+        return self._instance(session_id, 1)
 
     def create_stage2(self, session_id: str) -> GraphInstance:
-        checkpointer = MemorySaver()
-        graph = build_stage2_graph(checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": session_id}}
-        instance = GraphInstance(graph=graph, config=config, stage=2, checkpointer=checkpointer)
-        self._instances[session_id] = instance
-        self._touch(session_id)
-        return instance
+        return self._instance(session_id, 2)
 
     def get(self, session_id: str) -> Optional[GraphInstance]:
-        instance = self._instances.get(session_id)
-        if instance is not None:
-            self._touch(session_id)
-        return instance
+        """Return a graph bound to this session, or None if there is no session.
+
+        The stage comes from the session store rather than a process dictionary,
+        which is what lets a worker serve a session it never created.
+        """
+        session = get_session_store().get_session(session_id)
+        if session is None:
+            return None
+
+        stage = session.get("stage")
+        if stage not in (1, 2):
+            logger.warning("session=%s has unusable stage %r", session_id, stage)
+            return None
+
+        return self._instance(session_id, stage)
 
     def get_lock(self, session_id: str) -> threading.Lock:
-        if session_id not in self._locks:
-            self._locks[session_id] = threading.Lock()
-        return self._locks[session_id]
+        with self._registry_guard:
+            if session_id not in self._locks:
+                self._locks[session_id] = threading.Lock()
+            return self._locks[session_id]
 
     def remove(self, session_id: str) -> None:
-        self._instances.pop(session_id, None)
-        self._locks.pop(session_id, None)
-        self._last_used.pop(session_id, None)
+        with self._registry_guard:
+            self._locks.pop(session_id, None)
+            self._last_used.pop(session_id, None)
 
     def sweep_idle(self, max_idle_seconds: float) -> int:
-        """Evict graph instances untouched for longer than max_idle_seconds.
+        """Release the per-session locks of sessions nobody has touched.
 
-        Eviction is idle-based rather than completion-based on purpose: a
-        completed Stage 2 graph is still needed by the generate endpoint, which
-        reads its final state to build the generation request. Dropping it at
-        completion would break document generation.
-
-        Returns the number of instances evicted.
+        Graphs are no longer cached, so there is nothing heavyweight to evict —
+        but the lock dictionary would still grow without bound for the life of
+        the process.
         """
         cutoff = time.time() - max_idle_seconds
         stale = [
@@ -655,17 +741,17 @@ def create_stage2(
     # could keep using a link the manager could no longer reach, and its
     # document would be unreachable too.
     #
-    # The graph instance must exist too, not just the store record. Without a
-    # graph there is nothing to resume: the employee would open the link to a
-    # blank chat and every message would 404. Falling through to create a fresh
-    # session is better recovery than reissuing a token for a dead one.
+    # Since H3 the graph is rebuilt on demand from the shared checkpointer, so
+    # a live session is always servable and the opening question is read back
+    # from the checkpoint rather than from a cached instance.
     existing = store.get_linked_session(request.stage1_session_id)
-    existing_instance = _registry.get(existing) if existing else None
-    if existing and existing_instance and store.get_session(existing):
-        instance = existing_instance
-        greeting = instance.graph.get_state(instance.config).values.get(
-            "last_agent_message", ""
-        )
+    if existing and store.get_session(existing):
+        instance = _registry.get(existing)
+        greeting = ""
+        if instance:
+            greeting = instance.graph.get_state(instance.config).values.get(
+                "last_agent_message", ""
+            )
         logger.info(
             "session=%s stage=2 action=reissued linked_to=%s",
             existing, request.stage1_session_id,
