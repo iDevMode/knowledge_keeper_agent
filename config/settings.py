@@ -54,6 +54,13 @@ class Settings(BaseSettings):
         errors = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY is not set")
+        if not self.api_secret_key and self.environment != "development":
+            # Session tokens are signed with this. Without it the app falls back
+            # to a per-process key, so every restart silently invalidates every
+            # live interview link.
+            errors.append(
+                "API_SECRET_KEY is not set — session tokens would not survive a restart"
+            )
         if self.allowed_origins == "http://localhost:3000" and self.environment != "development":
             errors.append("ALLOWED_ORIGINS is still set to localhost — set to your production domain")
         if errors:

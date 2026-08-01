@@ -1,4 +1,4 @@
-"""End-to-end Stage 1 tests driving the real graph through the API.
+﻿"""End-to-end Stage 1 tests driving the real graph through the API.
 
 These exercise the full interrupt/resume cycle rather than calling routing
 functions in isolation, which is how the manager-review checkpoint regression
@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.api_client import AuthedTestClient
 
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -83,16 +83,16 @@ def stage1_llms():
 @pytest.fixture
 def client():
     from api.routes import app
-    return TestClient(app)
+    return AuthedTestClient(app)
 
 
-def _answer(client: TestClient, session_id: str, text: str) -> dict:
+def _answer(client: AuthedTestClient, session_id: str, text: str) -> dict:
     res = client.post(f"/api/sessions/{session_id}/message", json={"message": text})
     assert res.status_code == 200, f"unexpected {res.status_code}: {res.text}"
     return res.json()
 
 
-def _run_interview_until_review(client: TestClient, session_id: str) -> dict:
+def _run_interview_until_review(client: AuthedTestClient, session_id: str) -> dict:
     """Answer questions until the profile review appears. Returns that response."""
     for i in range(MAX_INTERVIEW_TURNS):
         # Neutral replies: neither a confirmation nor a correction instruction.

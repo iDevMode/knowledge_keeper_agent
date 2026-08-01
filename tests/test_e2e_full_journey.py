@@ -1,4 +1,4 @@
-"""Full three-stage journey: manager interview -> employee interview -> document.
+﻿"""Full three-stage journey: manager interview -> employee interview -> document.
 
 Covers the handoffs between stages, which no other test exercises end to end:
 Stage 1's confirmed profile reaching Stage 2 via the session store, and Stage 2's
@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.api_client import AuthedTestClient
 
 from agents.stage3_document_generation.generator import (
     _KNOWLEDGE_TRANSFER_MIN_COUNT,
@@ -91,7 +91,7 @@ def reset_singletons():
 @pytest.fixture
 def client():
     from api.routes import app
-    return TestClient(app)
+    return AuthedTestClient(app)
 
 
 @pytest.fixture
