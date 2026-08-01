@@ -52,7 +52,11 @@ def greeting_node(state: Stage1State) -> Dict[str, Any]:
     logger.info("session=%s stage=1 node=greeting", state.get("session_id", ""))
     return {
         "current_block": STAGE1_BLOCKS[0],
-        "current_question_index": 1,  # greeting covers q0 of business_context
+        # The greeting text *is* question 0, and process_answer runs before
+        # ask_question. Index must therefore stay at 0 so the answer to the
+        # greeting is filed under business_context.0; advance_question then
+        # moves to 1. Setting 1 here filed that answer as .1 and skipped q1.
+        "current_question_index": 0,
         "conversation_history": [AIMessage(content=GREETING_MESSAGE)],
         "last_agent_message": GREETING_MESSAGE,
         "followup_count": 0,

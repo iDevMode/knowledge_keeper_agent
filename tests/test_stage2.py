@@ -535,7 +535,11 @@ class TestGreetingNode:
         result = greeting_node(state)
         assert result["current_phase"] == "role_orientation"
         assert result["current_block"] == "role_orientation"
-        assert result["current_question_index"] == 1  # greeting covers q0
+        # The greeting IS q0 and process_answer runs before ask_question, so the
+        # index stays at 0 and the greeting's answer is filed under
+        # role_orientation.0. Asserting 1 here previously locked in a bug that
+        # misfiled that answer and skipped q1.
+        assert result["current_question_index"] == 0
         assert len(result["conversation_history"]) == 1
         assert isinstance(result["conversation_history"][0], AIMessage)
         assert "KnowledgeKeeper" in result["conversation_history"][0].content

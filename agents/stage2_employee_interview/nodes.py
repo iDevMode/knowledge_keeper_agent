@@ -114,7 +114,11 @@ def greeting_node(state: Stage2State) -> Dict[str, Any]:
     return {
         "current_phase": "role_orientation",
         "current_block": "role_orientation",
-        "current_question_index": 1,  # greeting covers q0
+        # The greeting text *is* role_orientation question 0, and process_answer
+        # runs before ask_question. Index must stay at 0 so that answer is filed
+        # under role_orientation.0; advance_question then moves to 1. Setting 1
+        # here filed it as .1 and skipped q1 ("what does a typical week look like").
+        "current_question_index": 0,
         "current_block_index": 0,
         "conversation_history": [AIMessage(content=greeting)],
         "last_agent_message": greeting,

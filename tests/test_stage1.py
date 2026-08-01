@@ -105,7 +105,11 @@ class TestGreetingNode:
         state = _make_state()
         result = greeting_node(state)
         assert result["current_block"] == "business_context"
-        assert result["current_question_index"] == 1  # greeting covers q0
+        # The greeting IS q0 and process_answer runs before ask_question, so the
+        # index stays at 0 and the greeting's answer is filed under
+        # business_context.0. Asserting 1 here previously locked in a bug that
+        # misfiled that answer and skipped q1 entirely.
+        assert result["current_question_index"] == 0
         assert len(result["conversation_history"]) == 1
         assert isinstance(result["conversation_history"][0], AIMessage)
         assert "KnowledgeKeeper" in result["conversation_history"][0].content

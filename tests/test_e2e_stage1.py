@@ -135,3 +135,42 @@ class TestStage1ManagerReviewCheckpoint:
         stored = get_session_store().get_profile(session_id)
         assert stored is not None, "profile was not stored for Stage 2 handoff"
         assert stored.job_title == _load_profile().job_title
+
+
+class TestStage1AnswerIndexing:
+    """Every question asked must be recorded under its own index (finding M2)."""
+
+    def _state(self, session_id):
+        from api.routes import _registry
+
+        instance = _registry.get(session_id)
+        return instance.graph.get_state(instance.config).values
+
+    def test_first_answer_is_filed_at_index_zero(self, client, stage1_llms):
+        session_id = client.post("/api/sessions/stage1").json()["session_id"]
+
+        # The greeting contains business_context question 0, so this answer
+        # belongs at index 0. Filing it at 1 also skipped question 1 entirely.
+        _answer(client, session_id, "We are a logistics firm in the Midlands.")
+
+        answers = self._state(session_id)["answers"]
+        assert "business_context.0" in answers, (
+            f"first answer misfiled; keys were {sorted(answers)}"
+        )
+
+    def test_no_question_index_is_skipped_in_the_first_block(self, client, stage1_llms):
+        from config.constants import STAGE1_BLOCK_QUESTION_COUNTS
+
+        session_id = client.post("/api/sessions/stage1").json()["session_id"]
+
+        expected = STAGE1_BLOCK_QUESTION_COUNTS["business_context"]
+        for i in range(expected):
+            _answer(client, session_id, f"Business context answer {i}.")
+
+        answers = self._state(session_id)["answers"]
+        recorded = sorted(
+            int(k.split(".")[1]) for k in answers if k.startswith("business_context.")
+        )
+        assert recorded == list(range(expected)), (
+            f"expected contiguous indices 0..{expected - 1}, got {recorded}"
+        )
