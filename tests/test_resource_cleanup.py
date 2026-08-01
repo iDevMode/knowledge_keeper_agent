@@ -6,9 +6,8 @@ the generated files on disk. A long-running instance leaked memory and disk
 until it fell over.
 """
 
-import os
 import time
-from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -149,55 +148,79 @@ class TestSessionStoreSweep:
 
 
 class TestDocumentRetention:
-    def _make_document(self, doc_id: str, age_seconds: float) -> Path:
-        path = routes_mod._document_dir() / f"{doc_id}.docx"
-        path.write_bytes(b"fake docx")
-        routes_mod._document_store[doc_id] = str(path)
-        routes_mod._generation_jobs[doc_id] = {
-            "status": "complete", "download_url": f"/api/documents/{doc_id}", "error": None,
-        }
-        routes_mod._document_created_at[doc_id] = time.time() - age_seconds
-        return path
+    """Documents are bytes in the store now, not files on disk (H3).
 
-    def test_expired_documents_are_deleted_from_disk_and_memory(self):
-        stale = self._make_document("stale-doc", age_seconds=10_000_000)
-        fresh = self._make_document("fresh-doc", age_seconds=0)
+    Keeping them out of the container filesystem is deliberate: a handover pack
+    carries the Risk Summary written about a departing employee, and the managed
+    temp directory previously had to be chmod'ed 0o700 to stop other local users
+    reading it.
+    """
 
-        try:
-            routes_mod.sweep_resources(force=True)
+    def _documents(self):
+        from api.document_store import get_document_store
 
-            assert not stale.exists(), "expired document file was left on disk"
-            assert "stale-doc" not in routes_mod._document_store
-            assert "stale-doc" not in routes_mod._generation_jobs
-            assert "stale-doc" not in routes_mod._document_created_at
+        return get_document_store()
 
-            assert fresh.exists()
-            assert "fresh-doc" in routes_mod._document_store
-        finally:
-            for p in (stale, fresh):
-                if p.exists():
-                    os.remove(p)
+    def _make_document(self, doc_id: str, age_seconds: float) -> None:
+        store = self._documents()
+        store.start_job(doc_id, f"session-for-{doc_id}")
+        store.complete_job(doc_id, f"{doc_id}.docx", routes_mod.DOCX_MEDIA_TYPE, b"fake docx")
+        store._documents[doc_id]["created_at"] = time.time() - age_seconds
 
-    def test_sweep_survives_a_missing_file(self):
-        self._make_document("ghost-doc", age_seconds=10_000_000)
-        os.remove(routes_mod._document_store["ghost-doc"])
+    def test_expired_documents_are_dropped_and_fresh_ones_kept(self):
+        self._make_document("stale-doc", age_seconds=10_000_000)
+        self._make_document("fresh-doc", age_seconds=0)
 
-        # Must not raise even though the file is already gone.
         routes_mod.sweep_resources(force=True)
 
-        assert "ghost-doc" not in routes_mod._document_store
+        store = self._documents()
+        assert store.get_content("stale-doc") is None
+        assert store.get_job("stale-doc") is None
+        assert store.owner_of("stale-doc") is None
 
-    def test_documents_share_one_managed_directory(self):
-        a = self._make_document("doc-a", age_seconds=0)
-        b = self._make_document("doc-b", age_seconds=0)
-        try:
-            assert a.parent == b.parent == routes_mod._DOCUMENT_DIR, (
-                "each generation should not create its own temp directory"
+        assert store.get_content("fresh-doc") is not None
+
+    def test_the_swept_count_is_reported(self):
+        self._make_document("a", age_seconds=10_000_000)
+        self._make_document("b", age_seconds=10_000_000)
+        self._make_document("c", age_seconds=0)
+
+        assert routes_mod.sweep_resources(force=True)["documents"] == 2
+
+    def test_a_swept_document_takes_its_session_pointer_with_it(self):
+        self._make_document("orphan-doc", age_seconds=10_000_000)
+        store = self._documents()
+        assert store.document_for_session("session-for-orphan-doc") == "orphan-doc"
+
+        routes_mod.sweep_resources(force=True)
+
+        assert store.document_for_session("session-for-orphan-doc") is None
+
+    def test_generation_leaves_no_file_behind(self):
+        """The exporters write a file; it must not outlive the export."""
+        from api.document_store import get_document_store
+        from output.formatters.document_formatter import InterimDocument
+
+        doc_dir = routes_mod._document_dir()
+        before = set(doc_dir.iterdir())
+
+        with patch("api.routes.generate_document") as gen, \
+             patch("api.routes.parse_llm_output"), \
+             patch("api.routes.generate_docx") as docx:
+            gen.return_value = MagicMock(raw_markdown="# Handover")
+            docx.side_effect = lambda d, p: (open(p, "wb").write(b"PACK"), p)[1]
+
+            get_document_store().start_job("transient-doc", "some-session")
+            routes_mod._run_generation_in_background(
+                "transient-doc", "some-session", MagicMock(), MagicMock(), "docx"
             )
-        finally:
-            for p in (a, b):
-                if p.exists():
-                    os.remove(p)
+
+        assert set(doc_dir.iterdir()) == before, (
+            "an exported handover pack was left on the container filesystem"
+        )
+        assert get_document_store().get_content("transient-doc") == (
+            "transient-doc.docx", routes_mod.DOCX_MEDIA_TYPE, b"PACK"
+        )
 
 
 class TestSweepRateLimiting:

@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
@@ -28,6 +28,7 @@ from api.auth import (
     issue_token,
     verify_token,
 )
+from api.document_store import get_document_store
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
 from config.settings import settings
@@ -316,19 +317,17 @@ if _FRONTEND_DIST.exists():
 
 # Module-level singletons
 _registry = GraphRegistry()
-_document_store: Dict[str, str] = {}  # document_id -> file_path
-_generation_jobs: Dict[str, Dict[str, Any]] = {}  # document_id -> {status, download_url, error}
-_document_created_at: Dict[str, float] = {}  # document_id -> unix timestamp
-_document_owner: Dict[str, str] = {}  # document_id -> owning stage 2 session_id
-_session_document: Dict[str, str] = {}  # stage 2 session_id -> document_id
-# Why the automatic Stage 3 run never started, surfaced to the manager. Without
-# this the manager watches an empty progress line forever and the only record is
-# a log entry nobody reads.
-_session_generation_error: Dict[str, str] = {}
+# Documents, generation jobs, ownership and per-session generation errors all
+# live behind the DocumentStore now — six process dictionaries and a directory
+# of files on local disk before H3, none of which survived a restart.
 
 # One managed directory for generated documents, instead of a fresh mkdtemp per
 # generation that was never cleaned up.
 _DOCUMENT_DIR = Path(tempfile.gettempdir()) / "knowledgekeeper_documents"
+
+DOCX_MEDIA_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 
 # How long generated documents and idle graph instances are retained. Tied to
 # the session TTL so a document outlives the session that produced it by the
@@ -439,7 +438,7 @@ def require_document_access(
 
     claims = _claims_or_401(raw)
 
-    owner_session = _document_owner.get(document_id)
+    owner_session = get_document_store().owner_of(document_id)
     if owner_session is None:
         # Unknown or swept document. 404 rather than 403 — an unauthenticated
         # caller should not be able to distinguish "exists" from "does not".
@@ -510,29 +509,12 @@ def sweep_resources(force: bool = False) -> Dict[str, int]:
 
     sessions = get_session_store().sweep_expired()
     instances = _registry.sweep_idle(_RETENTION_SECONDS)
-
-    cutoff = time.time() - _RETENTION_SECONDS
-    stale_documents = [
-        doc_id for doc_id, created in list(_document_created_at.items()) if created < cutoff
-    ]
-    for doc_id in stale_documents:
-        file_path = _document_store.pop(doc_id, None)
-        _generation_jobs.pop(doc_id, None)
-        _document_created_at.pop(doc_id, None)
-        owner = _document_owner.pop(doc_id, None)
-        if owner is not None and _session_document.get(owner) == doc_id:
-            _session_document.pop(owner, None)
-            _session_generation_error.pop(owner, None)
-        if file_path:
-            try:
-                os.remove(file_path)
-            except OSError as e:
-                logger.warning("could not delete expired document %s: %s", file_path, e)
+    documents = get_document_store().sweep_expired()
 
     result = {
         "sessions": sessions,
         "graph_instances": instances,
-        "documents": len(stale_documents),
+        "documents": documents,
     }
     if any(result.values()):
         logger.info("resource sweep released %s", result)
@@ -593,15 +575,7 @@ def _start_generation(session_id: str, output_format: str) -> str:
     gen_request, profile = _build_generation_request(session_id)
 
     document_id = str(uuid.uuid4())
-    _generation_jobs[document_id] = {
-        "status": "generating",
-        "download_url": None,
-        "error": None,
-    }
-    _document_created_at[document_id] = time.time()
-    _document_owner[document_id] = session_id
-    _session_document[session_id] = document_id
-    _session_generation_error.pop(session_id, None)
+    get_document_store().start_job(document_id, session_id)
 
     thread = threading.Thread(
         target=_run_generation_in_background,
@@ -631,40 +605,46 @@ def _run_generation_in_background(
         # Parse and export
         interim_doc = parse_llm_output(gen_result.raw_markdown, profile, session_id)
 
+        # The exporters write to a path, so a file exists briefly. It is read
+        # into the store and deleted immediately: a handover pack contains the
+        # Risk Summary written about a departing employee and has no business
+        # sitting on the container filesystem.
         output_dir = str(_document_dir())
+        file_path = os.path.join(output_dir, f"{document_id}.docx")
+        media_type = DOCX_MEDIA_TYPE
 
         if output_format == "pdf":
             try:
                 from output.exporters.pdf_exporter import generate_pdf
-                file_path = os.path.join(output_dir, f"{document_id}.pdf")
-                file_path = generate_pdf(interim_doc, file_path)
+                file_path = generate_pdf(interim_doc, os.path.join(output_dir, f"{document_id}.pdf"))
+                media_type = "application/pdf"
             except (ImportError, RuntimeError) as e:
                 logger.warning("PDF export unavailable (%s), falling back to DOCX", e)
-                file_path = os.path.join(output_dir, f"{document_id}.docx")
                 file_path = generate_docx(interim_doc, file_path)
         else:
-            file_path = os.path.join(output_dir, f"{document_id}.docx")
             file_path = generate_docx(interim_doc, file_path)
 
-        _document_store[document_id] = file_path
-        _document_created_at[document_id] = time.time()
-        _generation_jobs[document_id] = {
-            "status": "complete",
-            "download_url": f"/api/documents/{document_id}",
-            "error": None,
-        }
+        try:
+            with open(file_path, "rb") as f:
+                content = f.read()
+        finally:
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                logger.warning("could not delete transient export %s: %s", file_path, e)
 
-        on_document_generated(session_id, document_id, file_path)
-        logger.info("session=%s document=%s format=%s generation=complete", session_id, document_id, output_format)
+        filename = os.path.basename(file_path)
+        get_document_store().complete_job(document_id, filename, media_type, content)
+
+        on_document_generated(session_id, document_id, filename)
+        logger.info(
+            "session=%s document=%s format=%s bytes=%d generation=complete",
+            session_id, document_id, output_format, len(content),
+        )
 
     except Exception as e:
         logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
-        _document_created_at[document_id] = time.time()
-        _generation_jobs[document_id] = {
-            "status": "failed",
-            "download_url": None,
-            "error": str(e),
-        }
+        get_document_store().fail_job(document_id, str(e))
 
 
 # ---- Endpoints ----
@@ -861,13 +841,14 @@ def send_message(session_id: str, request: SendMessageRequest):
         # to the employee. The manager picks it up from session status.
         try:
             _start_generation(session_id, settings.default_output_format)
-            _session_generation_error.pop(session_id, None)
         except GenerationNotReady as e:
             logger.error("session=%s auto-generation skipped: %s", session_id, e)
-            _session_generation_error[session_id] = str(e)
+            get_document_store().set_generation_error(session_id, str(e))
         except Exception as e:
             logger.error("session=%s auto-generation failed to start: %s", session_id, e)
-            _session_generation_error[session_id] = "Document generation could not be started"
+            get_document_store().set_generation_error(
+                session_id, "Document generation could not be started"
+            )
         on_stage2_complete(session_id)
 
     return response
@@ -896,8 +877,9 @@ def get_session_status(
     # Only the manager is told a document exists — it is theirs to collect —
     # or why one does not.
     if claims.is_manager:
-        response.document_id = _session_document.get(session_id)
-        response.generation_error = _session_generation_error.get(session_id)
+        documents = get_document_store()
+        response.document_id = documents.document_for_session(session_id)
+        response.generation_error = documents.get_generation_error(session_id)
 
     if instance:
         snapshot = instance.graph.get_state(instance.config)
@@ -946,7 +928,7 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
 )
 def get_generation_status(document_id: str):
     """Poll for document generation status."""
-    job = _generation_jobs.get(document_id)
+    job = get_document_store().get_job(document_id)
     if not job:
         raise HTTPException(status_code=404, detail="Document generation job not found")
 
@@ -960,15 +942,16 @@ def get_generation_status(document_id: str):
 
 @app.get("/api/documents/{document_id}", dependencies=[Depends(require_document_access)])
 def download_document(document_id: str):
-    file_path = _document_store.get(document_id)
-    if not file_path or not os.path.exists(file_path):
+    stored = get_document_store().get_content(document_id)
+    if stored is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    filename = os.path.basename(file_path)
-    media_type = "application/pdf" if file_path.endswith(".pdf") else (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    filename, media_type, content = stored
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-    return FileResponse(path=file_path, filename=filename, media_type=media_type)
 
 
 # ---- SPA Fallback (must be last) ----

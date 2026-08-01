@@ -39,6 +39,7 @@ def _make_mock_llm(response_text="This is a test response."):
 @pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset module-level singletons between tests."""
+    import api.document_store as doc_mod
     import api.routes as routes_mod
     import api.session_manager as sm_mod
 
@@ -50,12 +51,7 @@ def reset_singletons():
     # the auth dependency reads — a rebind here would leave stale entries
     # visible to require_document_access.
     routes_mod._registry = routes_mod.GraphRegistry()
-    routes_mod._document_store.clear()
-    routes_mod._document_owner.clear()
-    routes_mod._session_document.clear()
-    routes_mod._session_generation_error.clear()
-    routes_mod._generation_jobs.clear()
-    routes_mod._document_created_at.clear()
+    doc_mod.reset_document_store()
 
     yield
 
@@ -418,25 +414,22 @@ class TestGenerateDocument:
 
 class TestDownloadDocument:
     def test_returns_file(self, client):
-        import api.routes as routes_mod
-
-        # Create a real temp file
-        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
-        tmp.write(b"fake docx content")
-        tmp.close()
+        from api.document_store import get_document_store
+        from api.routes import DOCX_MEDIA_TYPE
 
         doc_id = "test-doc-id"
         owner_session = "owner-session-id"
-        routes_mod._document_store[doc_id] = tmp.name
-        routes_mod._document_owner[doc_id] = owner_session
+        store = get_document_store()
+        store.start_job(doc_id, owner_session)
+        store.complete_job(doc_id, "pack.docx", DOCX_MEDIA_TYPE, b"fake docx content")
         client.adopt(owner_session)
 
-        try:
-            response = client.get(f"/api/documents/{doc_id}")
-            assert response.status_code == 200
-            assert response.content == b"fake docx content"
-        finally:
-            os.unlink(tmp.name)
+        response = client.get(f"/api/documents/{doc_id}")
+
+        assert response.status_code == 200
+        assert response.content == b"fake docx content"
+        assert response.headers["content-type"] == DOCX_MEDIA_TYPE
+        assert 'filename="pack.docx"' in response.headers["content-disposition"]
 
     def test_rejects_unauthenticated_caller(self, client):
         response = client.get("/api/documents/nonexistent")

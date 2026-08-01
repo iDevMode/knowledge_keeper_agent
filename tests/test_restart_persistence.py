@@ -69,13 +69,17 @@ def _bearer(token: str) -> dict:
 
 def _restart() -> TestClient:
     """Throw away every piece of process state, as a redeploy does."""
+    import api.document_store as doc_mod
     import api.routes as routes_mod
     import api.session_manager as sm_mod
 
-    store = sm_mod._store
-    if store is not None and hasattr(store, "close"):
-        store.close()
+    for module in (sm_mod, doc_mod):
+        store = module._store
+        if store is not None and hasattr(store, "close"):
+            store.close()
+
     sm_mod.reset_session_store()
+    doc_mod.reset_document_store()
     routes_mod.reset_checkpointer()
     routes_mod._registry = routes_mod.GraphRegistry()
 
@@ -93,7 +97,10 @@ def durable(monkeypatch):
     import psycopg
 
     with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
-        conn.execute("TRUNCATE kk_sessions, kk_session_links, kk_profiles")
+        conn.execute(
+            "TRUNCATE kk_sessions, kk_session_links, kk_profiles, "
+            "kk_documents, kk_generation_errors"
+        )
         for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
             try:
                 conn.execute(f"TRUNCATE {table}")
@@ -277,6 +284,84 @@ class TestStage2SurvivesRestart:
             flags = instance.graph.get_state(instance.config).values.get("risk_flags", [])
 
         assert len(flags) == 2, f"risk flags were lost across the restart: {len(flags)}"
+
+
+class TestTheHandoverPackSurvivesRestart:
+    """A generated pack used to be a file on the container filesystem.
+
+    The next container did not have it, and the six dictionaries that recorded
+    its existence were gone too — so the manager's page went from "preparing
+    your pack" to nothing, with no record that a document had ever been made.
+    """
+
+    def test_a_completed_pack_is_downloadable_after_a_restart(self, durable):
+        from api.auth import MANAGER, issue_token
+        from api.document_store import get_document_store
+        from api.routes import DOCX_MEDIA_TYPE
+        from api.session_manager import get_session_store
+
+        store = get_session_store()
+        stage1_id = store.create_session(stage=1)
+        stage2_id = store.create_session(stage=2)
+        store.link_sessions(stage1_id, stage2_id)
+        manager_token = issue_token(stage1_id, MANAGER)
+
+        documents = get_document_store()
+        documents.start_job("pack-1", stage2_id)
+        documents.complete_job(
+            "pack-1", "handover.docx", DOCX_MEDIA_TYPE, b"RISK SUMMARY: sole owner"
+        )
+
+        client = _restart()
+
+        response = client.get("/api/documents/pack-1", headers=_bearer(manager_token))
+        assert response.status_code == 200, "the handover pack was lost on restart"
+        assert response.content == b"RISK SUMMARY: sole owner"
+
+    def test_the_manager_still_sees_the_document_on_status(self, durable):
+        from api.auth import MANAGER, issue_token
+        from api.document_store import get_document_store
+        from api.routes import DOCX_MEDIA_TYPE
+        from api.session_manager import get_session_store
+
+        store = get_session_store()
+        stage1_id = store.create_session(stage=1)
+        stage2_id = store.create_session(stage=2)
+        store.link_sessions(stage1_id, stage2_id)
+        manager_token = issue_token(stage1_id, MANAGER)
+
+        documents = get_document_store()
+        documents.start_job("pack-2", stage2_id)
+        documents.complete_job("pack-2", "handover.docx", DOCX_MEDIA_TYPE, b"x")
+
+        client = _restart()
+
+        body = client.get(
+            f"/api/sessions/{stage2_id}/status", headers=_bearer(manager_token)
+        ).json()
+        assert body["document_id"] == "pack-2"
+
+    def test_a_recorded_generation_failure_survives(self, durable):
+        from api.auth import MANAGER, issue_token
+        from api.document_store import get_document_store
+        from api.session_manager import get_session_store
+
+        store = get_session_store()
+        stage1_id = store.create_session(stage=1)
+        stage2_id = store.create_session(stage=2)
+        store.link_sessions(stage1_id, stage2_id)
+        manager_token = issue_token(stage1_id, MANAGER)
+
+        get_document_store().set_generation_error(stage2_id, "Stage 1 profile not found")
+
+        client = _restart()
+
+        body = client.get(
+            f"/api/sessions/{stage2_id}/status", headers=_bearer(manager_token)
+        ).json()
+        assert body["generation_error"] == "Stage 1 profile not found", (
+            "the manager would be back to an unexplained empty progress line"
+        )
 
 
 class TestTheInMemoryPathGenuinelyDoesNotSurvive:

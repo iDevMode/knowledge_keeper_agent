@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from api.document_store import COMPLETE, FAILED, GENERATING
 from config.settings import settings
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -47,6 +48,28 @@ CREATE TABLE IF NOT EXISTS kk_session_links (
 CREATE TABLE IF NOT EXISTS kk_profiles (
     session_id  TEXT PRIMARY KEY,
     profile     JSONB NOT NULL
+);
+
+-- Handover packs are stored as bytes, not paths. They contain the Risk Summary
+-- written about a departing employee, and keeping them out of the container
+-- filesystem removes a whole class of local exposure as well as surviving a
+-- redeploy.
+CREATE TABLE IF NOT EXISTS kk_documents (
+    document_id TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    error       TEXT,
+    filename    TEXT,
+    media_type  TEXT,
+    content     BYTEA,
+    created_at  DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kk_documents_session_id ON kk_documents (session_id);
+CREATE INDEX IF NOT EXISTS kk_documents_created_at ON kk_documents (created_at);
+
+CREATE TABLE IF NOT EXISTS kk_generation_errors (
+    session_id  TEXT PRIMARY KEY,
+    message     TEXT NOT NULL
 );
 """
 
@@ -192,6 +215,143 @@ class PostgresSessionStore:
             )
 
         return len(expired)
+
+    def close(self) -> None:
+        self._pool.close()
+
+
+class PostgresDocumentStore:
+    """DocumentStore backed by Postgres. See the protocol in document_store."""
+
+    def __init__(self, conninfo: Optional[str] = None, ttl_hours: float | None = None,
+                 pool: Optional[ConnectionPool] = None):
+        self._ttl_seconds = (ttl_hours or settings.session_ttl_hours) * 3600
+        if pool is not None:
+            self._pool = pool
+        else:
+            self._pool = ConnectionPool(
+                conninfo or settings.database_url,
+                min_size=1, max_size=10, timeout=10, open=True,
+            )
+        with self._pool.connection() as conn:
+            conn.execute(SCHEMA)
+
+    def start_job(self, document_id: str, session_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO kk_documents "
+                "(document_id, session_id, status, created_at) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (document_id) DO UPDATE SET status = EXCLUDED.status",
+                (document_id, session_id, GENERATING, time.time()),
+            )
+            conn.execute(
+                "DELETE FROM kk_generation_errors WHERE session_id = %s", (session_id,)
+            )
+
+    def complete_job(self, document_id: str, filename: str, media_type: str,
+                     content: bytes) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE kk_documents SET status = %s, filename = %s, media_type = %s, "
+                "content = %s, error = NULL WHERE document_id = %s",
+                (COMPLETE, filename, media_type, content, document_id),
+            )
+
+    def fail_job(self, document_id: str, error: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE kk_documents SET status = %s, error = %s WHERE document_id = %s",
+                (FAILED, error, document_id),
+            )
+
+    def get_job(self, document_id: str) -> Optional[Dict[str, Any]]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT status, error FROM kk_documents WHERE document_id = %s",
+                (document_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        status, error = row
+        return {
+            "status": status,
+            "error": error,
+            "download_url": f"/api/documents/{document_id}" if status == COMPLETE else None,
+        }
+
+    def get_content(self, document_id: str) -> Optional[tuple[str, str, bytes]]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT filename, media_type, content FROM kk_documents "
+                "WHERE document_id = %s AND content IS NOT NULL",
+                (document_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        filename, media_type, content = row
+        return filename, media_type, bytes(content)
+
+    def owner_of(self, document_id: str) -> Optional[str]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT session_id FROM kk_documents WHERE document_id = %s",
+                (document_id,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def document_for_session(self, session_id: str) -> Optional[str]:
+        """The most recent document for a session — regeneration supersedes."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT document_id FROM kk_documents WHERE session_id = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_generation_error(self, session_id: str, message: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO kk_generation_errors (session_id, message) VALUES (%s, %s) "
+                "ON CONFLICT (session_id) DO UPDATE SET message = EXCLUDED.message",
+                (session_id, message),
+            )
+
+    def clear_generation_error(self, session_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM kk_generation_errors WHERE session_id = %s", (session_id,)
+            )
+
+    def get_generation_error(self, session_id: str) -> Optional[str]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT message FROM kk_generation_errors WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def sweep_expired(self) -> int:
+        cutoff = time.time() - self._ttl_seconds
+        with self._pool.connection() as conn:
+            orphaned = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT session_id FROM kk_documents WHERE created_at < %s",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            removed = conn.execute(
+                "DELETE FROM kk_documents WHERE created_at < %s", (cutoff,)
+            ).rowcount
+            if orphaned:
+                # Only for sessions left with no documents at all.
+                conn.execute(
+                    "DELETE FROM kk_generation_errors WHERE session_id = ANY(%s) "
+                    "AND session_id NOT IN (SELECT session_id FROM kk_documents)",
+                    (orphaned,),
+                )
+        return removed
 
     def close(self) -> None:
         self._pool.close()

@@ -22,17 +22,13 @@ NO_FOLLOWUP = json.dumps({"needs_followup": False, "reason": "clear", "suggested
 
 @pytest.fixture(autouse=True)
 def reset_singletons():
+    import api.document_store as doc_mod
     import api.routes as routes_mod
     import api.session_manager as sm_mod
 
     sm_mod._store = None
     routes_mod._registry = routes_mod.GraphRegistry()
-    routes_mod._document_store.clear()
-    routes_mod._document_owner.clear()
-    routes_mod._session_document.clear()
-    routes_mod._session_generation_error.clear()
-    routes_mod._generation_jobs.clear()
-    routes_mod._document_created_at.clear()
+    doc_mod.reset_document_store()
     yield
 
 
@@ -71,15 +67,28 @@ def _primary(*a, **k):
     return llm
 
 
-def _await_job(routes_mod, timeout: float = 10.0) -> str:
+def _documents():
+    from api.document_store import get_document_store
+
+    return get_document_store()
+
+
+def _job_count() -> int:
+    return len(_documents()._documents)
+
+
+def _await_job(session_id: str, timeout: float = 10.0) -> str:
     """Wait for the auto-triggered job to appear and settle."""
     deadline = time.time() + timeout
-    while time.time() < deadline and not routes_mod._generation_jobs:
-        time.sleep(0.02)
-    assert routes_mod._generation_jobs, "no generation job was started"
+    store = _documents()
 
-    doc_id = next(iter(routes_mod._generation_jobs))
-    while time.time() < deadline and routes_mod._generation_jobs[doc_id]["status"] == "generating":
+    while time.time() < deadline and store.document_for_session(session_id) is None:
+        time.sleep(0.02)
+
+    doc_id = store.document_for_session(session_id)
+    assert doc_id, "no generation job was started"
+
+    while time.time() < deadline and store.get_job(doc_id)["status"] == "generating":
         time.sleep(0.02)
     return doc_id
 
@@ -147,18 +156,18 @@ class TestGenerationStartsWithoutTheClient:
 
         engagement.answer_until_complete()
 
-        doc_id = _await_job(routes_mod)
-        assert routes_mod._generation_jobs[doc_id]["status"] == "complete"
-        assert doc_id in routes_mod._document_store
+        doc_id = _await_job(engagement.stage2_id)
+        assert _documents().get_job(doc_id)["status"] == "complete"
+        assert _documents().get_content(doc_id) is not None
 
     def test_the_document_is_attributed_to_the_stage2_session(self, client, engagement):
         import api.routes as routes_mod
 
         engagement.answer_until_complete()
-        doc_id = _await_job(routes_mod)
+        doc_id = _await_job(engagement.stage2_id)
 
-        assert routes_mod._document_owner[doc_id] == engagement.stage2_id
-        assert routes_mod._session_document[engagement.stage2_id] == doc_id
+        assert _documents().owner_of(doc_id) == engagement.stage2_id
+        assert _documents().document_for_session(engagement.stage2_id) == doc_id
 
     def test_generation_is_not_triggered_before_completion(self, client, engagement):
         import api.routes as routes_mod
@@ -168,7 +177,7 @@ class TestGenerationStartsWithoutTheClient:
             json={"message": "Only the first answer."},
             headers=_bearer(engagement.employee_token),
         )
-        assert routes_mod._generation_jobs == {}
+        assert _job_count() == 0
 
 
 class TestOnlyTheManagerLearnsAboutTheDocument:
@@ -181,7 +190,7 @@ class TestOnlyTheManagerLearnsAboutTheDocument:
         import api.routes as routes_mod
 
         engagement.answer_until_complete()
-        doc_id = _await_job(routes_mod)
+        doc_id = _await_job(engagement.stage2_id)
 
         response = client.get(
             f"/api/sessions/{engagement.stage2_id}/status",
@@ -193,7 +202,7 @@ class TestOnlyTheManagerLearnsAboutTheDocument:
         import api.routes as routes_mod
 
         engagement.answer_until_complete()
-        _await_job(routes_mod)
+        _await_job(engagement.stage2_id)
 
         response = client.get(
             f"/api/sessions/{engagement.stage2_id}/status",
@@ -258,9 +267,9 @@ class TestFailureIsVisibleToTheManager:
     def test_a_successful_regeneration_clears_the_error(self, client, tmp_path, engagement):
         import api.routes as routes_mod
 
-        routes_mod._session_generation_error[engagement.stage2_id] = "an earlier failure"
+        _documents().set_generation_error(engagement.stage2_id, "an earlier failure")
         engagement.answer_until_complete()
-        _await_job(routes_mod)
+        _await_job(engagement.stage2_id)
 
         response = client.get(
             f"/api/sessions/{engagement.stage2_id}/status",
@@ -275,7 +284,7 @@ class TestManagerCanStillRegenerate:
         import api.routes as routes_mod
 
         engagement.answer_until_complete()
-        first = _await_job(routes_mod)
+        first = _await_job(engagement.stage2_id)
 
         response = client.post(
             f"/api/sessions/{engagement.stage2_id}/generate",
@@ -286,6 +295,6 @@ class TestManagerCanStillRegenerate:
         second = response.json()["document_id"]
 
         assert second != first
-        assert routes_mod._document_owner[second] == engagement.stage2_id
+        assert _documents().owner_of(second) == engagement.stage2_id
         # The session now points at the newer document.
-        assert routes_mod._session_document[engagement.stage2_id] == second
+        assert _documents().document_for_session(engagement.stage2_id) == second
