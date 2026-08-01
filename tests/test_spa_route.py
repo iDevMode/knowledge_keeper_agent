@@ -14,8 +14,14 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.testclient import TestClient
 
 import api.routes as routes_mod
+from api.routes import safe_static_path
 
-pytestmark = pytest.mark.skipif(
+# NOTE: tests that need the mounted route are marked skipif, because
+# frontend/dist is a gitignored build artefact and the route is only mounted
+# when it exists. TestContainmentGuard below deliberately does NOT depend on
+# that — it exercises the guard directly so it still runs in CI and on a fresh
+# clone, which is precisely where a silently-skipped security test is useless.
+requires_built_frontend = pytest.mark.skipif(
     not hasattr(routes_mod, "serve_spa"),
     reason="SPA route only mounted when frontend/dist exists",
 )
@@ -30,6 +36,50 @@ TRAVERSAL_PROBES = [
 ]
 
 
+class TestContainmentGuard:
+    """Runs everywhere, including CI — no built frontend required."""
+
+    @pytest.fixture
+    def site(self, tmp_path):
+        dist = tmp_path / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<html></html>")
+        (dist / "assets" / "app.js").write_text("console.log(1)")
+        # A secret sitting outside the served root, as .env does in the repo.
+        (tmp_path / "secret.env").write_text("ANTHROPIC_API_KEY=sk-ant-secret")
+        return dist
+
+    @pytest.mark.parametrize(
+        "probe",
+        [
+            "../secret.env",
+            "../../secret.env",
+            "assets/../../secret.env",
+            "../../../../../../etc/passwd",
+        ],
+    )
+    def test_traversal_is_refused(self, site, probe):
+        assert safe_static_path(site, probe) is None, (
+            f"{probe!r} escaped the served root"
+        )
+
+    @pytest.mark.parametrize("relative", ["index.html", "assets/app.js"])
+    def test_legitimate_files_are_served(self, site, relative):
+        resolved = safe_static_path(site, relative)
+        assert resolved is not None
+        assert resolved.is_relative_to(site.resolve())
+
+    def test_missing_file_returns_none(self, site):
+        assert safe_static_path(site, "does/not/exist.js") is None
+
+    def test_empty_path_returns_none(self, site):
+        assert safe_static_path(site, "") is None
+
+    def test_directory_is_not_served_as_a_file(self, site):
+        assert safe_static_path(site, "assets") is None
+
+
+@requires_built_frontend
 class TestSpaPathContainment:
     def test_traversal_never_returns_a_file_outside_dist(self):
         dist = routes_mod._FRONTEND_DIST.resolve()
