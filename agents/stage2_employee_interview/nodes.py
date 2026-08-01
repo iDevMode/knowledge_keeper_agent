@@ -6,6 +6,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.parsing import ClassifierParseError, extract_json
+from agents.text_utils import enforce_single_question, validate_single_question
 from agents.stage2_employee_interview.prompts import (
     BLOCK_QUESTIONS,
     CLOSING_MESSAGE,
@@ -50,9 +51,32 @@ def _get_classifier_llm() -> ChatAnthropic:
     )
 
 
-def validate_single_question(text: str) -> bool:
-    """Check that the text contains at most one question mark."""
-    return text.count("?") <= 1
+def _single_question_or_retry(llm, messages, response_text: str, session_id: str) -> str:
+    """Re-prompt once if the response has multiple questions, then enforce.
+
+    Previously the retry's output was used without re-checking, so a model that
+    ignored the re-prompt still shipped multiple questions to the user — the
+    node-level enforcement CLAUDE.md requires was effectively advisory.
+    """
+    if validate_single_question(response_text):
+        return response_text
+
+    logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
+    retry_messages = [
+        *messages,
+        AIMessage(content=response_text),
+        HumanMessage(content=SINGLE_QUESTION_REPROMPT),
+    ]
+    retried = llm.invoke(retry_messages).content
+
+    if validate_single_question(retried):
+        return retried
+
+    logger.warning(
+        "session=%s Re-prompt still returned multiple questions — truncating to the first",
+        session_id,
+    )
+    return enforce_single_question(retried)
 
 
 def load_profile_node(state: Stage2State) -> Dict[str, Any]:
@@ -170,12 +194,7 @@ def ask_question_node(state: Stage2State) -> Dict[str, Any]:
     response = llm.invoke(messages)
     response_text = response.content
 
-    if not validate_single_question(response_text):
-        logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = _single_question_or_retry(llm, messages, response_text, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
@@ -379,11 +398,7 @@ def followup_question_node(state: Stage2State) -> Dict[str, Any]:
     response = llm.invoke(messages)
     response_text = response.content
 
-    if not validate_single_question(response_text):
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = _single_question_or_retry(llm, messages, response_text, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
