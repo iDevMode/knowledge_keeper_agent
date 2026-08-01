@@ -2,6 +2,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,6 +83,10 @@ class GraphRegistry:
     def __init__(self):
         self._instances: Dict[str, GraphInstance] = {}
         self._locks: Dict[str, threading.Lock] = {}
+        self._last_used: Dict[str, float] = {}
+
+    def _touch(self, session_id: str) -> None:
+        self._last_used[session_id] = time.time()
 
     def create_stage1(self, session_id: str) -> GraphInstance:
         checkpointer = MemorySaver()
@@ -89,6 +94,7 @@ class GraphRegistry:
         config = {"configurable": {"thread_id": session_id}}
         instance = GraphInstance(graph=graph, config=config, stage=1, checkpointer=checkpointer)
         self._instances[session_id] = instance
+        self._touch(session_id)
         return instance
 
     def create_stage2(self, session_id: str) -> GraphInstance:
@@ -97,10 +103,14 @@ class GraphRegistry:
         config = {"configurable": {"thread_id": session_id}}
         instance = GraphInstance(graph=graph, config=config, stage=2, checkpointer=checkpointer)
         self._instances[session_id] = instance
+        self._touch(session_id)
         return instance
 
     def get(self, session_id: str) -> Optional[GraphInstance]:
-        return self._instances.get(session_id)
+        instance = self._instances.get(session_id)
+        if instance is not None:
+            self._touch(session_id)
+        return instance
 
     def get_lock(self, session_id: str) -> threading.Lock:
         if session_id not in self._locks:
@@ -110,6 +120,27 @@ class GraphRegistry:
     def remove(self, session_id: str) -> None:
         self._instances.pop(session_id, None)
         self._locks.pop(session_id, None)
+        self._last_used.pop(session_id, None)
+
+    def sweep_idle(self, max_idle_seconds: float) -> int:
+        """Evict graph instances untouched for longer than max_idle_seconds.
+
+        Eviction is idle-based rather than completion-based on purpose: a
+        completed Stage 2 graph is still needed by the generate endpoint, which
+        reads its final state to build the generation request. Dropping it at
+        completion would break document generation.
+
+        Returns the number of instances evicted.
+        """
+        cutoff = time.time() - max_idle_seconds
+        stale = [
+            session_id
+            for session_id, last_used in list(self._last_used.items())
+            if last_used < cutoff
+        ]
+        for session_id in stale:
+            self.remove(session_id)
+        return len(stale)
 
 
 # ---- Graph Invocation Helpers ----
@@ -162,6 +193,107 @@ if _FRONTEND_DIST.exists():
 _registry = GraphRegistry()
 _document_store: Dict[str, str] = {}  # document_id -> file_path
 _generation_jobs: Dict[str, Dict[str, Any]] = {}  # document_id -> {status, download_url, error}
+_document_created_at: Dict[str, float] = {}  # document_id -> unix timestamp
+
+# One managed directory for generated documents, instead of a fresh mkdtemp per
+# generation that was never cleaned up.
+_DOCUMENT_DIR = Path(tempfile.gettempdir()) / "knowledgekeeper_documents"
+
+# How long generated documents and idle graph instances are retained. Tied to
+# the session TTL so a document outlives the session that produced it by the
+# same window.
+_RETENTION_SECONDS = settings.session_ttl_hours * 3600
+
+# Sweeps are opportunistic — triggered by request handlers rather than a
+# background thread — so they are rate limited to avoid doing this work on
+# every call.
+_SWEEP_INTERVAL_SECONDS = 300.0
+_last_sweep_at = 0.0
+_sweep_lock = threading.Lock()
+
+
+def safe_static_path(base: Path, relative: str) -> Optional[Path]:
+    """Resolve `relative` under `base`, returning None if it escapes or is absent.
+
+    Kept as a module-level function rather than inlined in the SPA handler so the
+    containment guard can be tested without a built frontend. frontend/dist is a
+    gitignored build artefact, so a test that needs the route mounted skips in CI
+    and on any fresh clone — exactly where the guard matters most.
+    """
+    if not relative:
+        return None
+
+    root = base.resolve()
+    candidate = (root / relative).resolve()
+
+    if not candidate.is_file():
+        return None
+    if not candidate.is_relative_to(root):
+        return None
+    return candidate
+
+
+def _document_dir() -> Path:
+    """Return the managed document directory, restricted to the running user.
+
+    The directory this replaced was created by tempfile.mkdtemp, which is
+    documented as readable/writable/searchable only by the creating user (0o700).
+    Path.mkdir defaults to 0o777 & ~umask — typically 0o755 on Linux — so
+    switching to a shared managed directory would have widened access to
+    generated handover documents, which contain sensitive HR content.
+
+    chmod is applied on every call because mkdir's mode argument is ignored when
+    the directory already exists. It is best-effort: Windows does not honour
+    POSIX modes, and a directory owned by another user cannot be chmod'ed.
+    """
+    _DOCUMENT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(_DOCUMENT_DIR, 0o700)
+    except OSError as e:
+        logger.warning("could not restrict permissions on %s: %s", _DOCUMENT_DIR, e)
+    return _DOCUMENT_DIR
+
+
+def sweep_resources(force: bool = False) -> Dict[str, int]:
+    """Release expired sessions, idle graph instances and old documents.
+
+    Without this every one of these grows monotonically for the lifetime of the
+    process: graph instances and their checkpoints, job records, and the
+    generated files on disk.
+    """
+    global _last_sweep_at
+
+    with _sweep_lock:
+        now = time.time()
+        if not force and now - _last_sweep_at < _SWEEP_INTERVAL_SECONDS:
+            return {}
+        _last_sweep_at = now
+
+    sessions = get_session_store().sweep_expired()
+    instances = _registry.sweep_idle(_RETENTION_SECONDS)
+
+    cutoff = time.time() - _RETENTION_SECONDS
+    stale_documents = [
+        doc_id for doc_id, created in list(_document_created_at.items()) if created < cutoff
+    ]
+    for doc_id in stale_documents:
+        file_path = _document_store.pop(doc_id, None)
+        _generation_jobs.pop(doc_id, None)
+        _document_created_at.pop(doc_id, None)
+        if file_path:
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                logger.warning("could not delete expired document %s: %s", file_path, e)
+
+    result = {
+        "sessions": sessions,
+        "graph_instances": instances,
+        "documents": len(stale_documents),
+    }
+    if any(result.values()):
+        logger.info("resource sweep released %s", result)
+    return result
 
 
 # ---- Background Generation Worker ----
@@ -180,7 +312,7 @@ def _run_generation_in_background(
         # Parse and export
         interim_doc = parse_llm_output(gen_result.raw_markdown, profile, session_id)
 
-        output_dir = tempfile.mkdtemp(prefix="kk_")
+        output_dir = str(_document_dir())
 
         if output_format == "pdf":
             try:
@@ -196,6 +328,7 @@ def _run_generation_in_background(
             file_path = generate_docx(interim_doc, file_path)
 
         _document_store[document_id] = file_path
+        _document_created_at[document_id] = time.time()
         _generation_jobs[document_id] = {
             "status": "complete",
             "download_url": f"/api/documents/{document_id}",
@@ -207,6 +340,7 @@ def _run_generation_in_background(
 
     except Exception as e:
         logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
+        _document_created_at[document_id] = time.time()
         _generation_jobs[document_id] = {
             "status": "failed",
             "download_url": None,
@@ -218,24 +352,13 @@ def _run_generation_in_background(
 
 @app.get("/api/health")
 def health_check():
-    import os
-    key = settings.anthropic_api_key
-    raw_key = os.environ.get("ANTHROPIC_API_KEY", "(not in os.environ)")
-    return {
-        "status": "ok",
-        "api_key_set": bool(key),
-        "api_key_preview": f"{key[:12]}..." if key else "(empty)",
-        "raw_env_key_preview": f"{raw_key[:12]}..." if raw_key and raw_key != "(not in os.environ)" else raw_key,
-        "environment": settings.environment,
-        "raw_env_environment": os.environ.get("ENVIRONMENT", "(not in os.environ)"),
-        "allowed_origins": settings.allowed_origins,
-        "raw_env_origins": os.environ.get("ALLOWED_ORIGINS", "(not in os.environ)"),
-        "all_env_keys_with_ant": [k for k in os.environ.keys() if "ANT" in k.upper() or "API" in k.upper()],
-    }
+    """Liveness probe. Deliberately discloses no configuration — it is public."""
+    return {"status": "ok"}
 
 
 @app.post("/api/sessions/stage1", response_model=SessionCreatedResponse)
 def create_stage1():
+    sweep_resources()
     store = get_session_store()
     session_id = store.create_session(stage=1)
 
@@ -254,6 +377,8 @@ def create_stage1():
         "followup_count": 0,
         "pending_followup": None,
         "last_agent_message": "",
+        "profile_generation_errors": [],
+        "profile_generation_attempts": 0,
     }
 
     state = _run_graph_initial(instance, initial_state)
@@ -265,6 +390,7 @@ def create_stage1():
 
 @app.post("/api/sessions/stage2", response_model=SessionCreatedResponse)
 def create_stage2(request: CreateStage2Request):
+    sweep_resources()
     store = get_session_store()
 
     # Validate Stage 1 session exists
@@ -320,14 +446,15 @@ def send_message(session_id: str, request: SendMessageRequest):
     if not instance:
         raise HTTPException(status_code=404, detail="No active graph for session")
 
-    # Check if session is already complete
-    snapshot = instance.graph.get_state(instance.config)
-    current_state = snapshot.values
-    if current_state.get("session_complete"):
-        raise HTTPException(status_code=400, detail="Session is already complete")
-
     lock = _registry.get_lock(session_id)
     with lock:
+        # Read the completion flag INSIDE the lock. Checking before acquiring it
+        # let two near-simultaneous messages both observe an incomplete session
+        # and both resume the graph.
+        snapshot = instance.graph.get_state(instance.config)
+        if snapshot.values.get("session_complete"):
+            raise HTTPException(status_code=400, detail="Session is already complete")
+
         state = _run_graph_resume(instance, request.message)
 
     agent_message = state.get("last_agent_message", "")
@@ -336,18 +463,18 @@ def send_message(session_id: str, request: SendMessageRequest):
     response = MessageResponse(message=agent_message, session_complete=session_complete)
 
     if session_complete and instance.stage == 1:
-        profile = state.get("role_intelligence_profile")
-        if profile:
-            profile_obj = profile if hasattr(profile, "model_dump") else None
-            if profile_obj:
-                store.store_profile(session_id, profile_obj)
-                response.profile = profile_obj.model_dump()
-            else:
-                # profile is already a dict
-                from models.role_intelligence_profile import RoleIntelligenceProfile
-                profile_validated = RoleIntelligenceProfile.model_validate(profile)
-                store.store_profile(session_id, profile_validated)
-                response.profile = profile if isinstance(profile, dict) else profile_validated.model_dump()
+        # finalise_node is the single writer of the confirmed profile — it runs
+        # only after the manager confirms, so it is the correct place for that
+        # decision. This endpoint previously stored it a second time, which also
+        # meant an unconfirmed profile could be persisted on paths that complete
+        # without confirmation. Here we only echo what was stored.
+        profile = store.get_profile(session_id)
+        if profile is not None:
+            response.profile = profile.model_dump()
+        else:
+            logger.warning(
+                "session=%s stage=1 completed without a confirmed profile", session_id
+            )
         store.update_session(session_id, {"session_complete": True})
         on_stage1_complete(session_id)
 
@@ -439,6 +566,7 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
         "download_url": None,
         "error": None,
     }
+    _document_created_at[document_id] = time.time()
 
     # Run in background thread
     thread = threading.Thread(
@@ -491,9 +619,13 @@ if _FRONTEND_DIST.exists():
 
     @app.get("/{full_path:path}")
     def serve_spa(full_path: str):
-        # If the path maps to a real file in dist, serve it
-        file_path = _FRONTEND_DIST / full_path
-        if full_path and file_path.exists() and file_path.is_file():
-            return FileResponse(str(file_path))
+        # Only ever serve files that resolve INSIDE the dist directory. Starlette
+        # normalises ".." out of request paths today, so this is defence in depth
+        # — but the containment check must live here, not depend on an upstream
+        # layer we do not control (a proxy forwarding raw dot segments, a
+        # different ASGI server, or a direct call would all bypass it).
+        candidate = safe_static_path(_FRONTEND_DIST, full_path)
+        if candidate is not None:
+            return FileResponse(str(candidate))
         # Otherwise serve index.html for client-side routing
         return HTMLResponse(_index_html)

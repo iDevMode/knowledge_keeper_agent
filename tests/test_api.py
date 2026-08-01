@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -73,10 +74,13 @@ def mock_llms():
         patch("agents.stage2_employee_interview.nodes._get_primary_llm", return_value=primary),
         patch("agents.stage2_employee_interview.nodes._get_classifier_llm", return_value=classifier),
     ]
-    mocks = [p.start() for p in patches]
-    yield primary, classifier
-    for p in patches:
-        p.stop()
+    # ExitStack unwinds whatever was entered, even if a later enter_context or
+    # the test itself raises. A bare start()/stop() pair leaks patches into
+    # subsequent tests when anything fails in between.
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        yield primary, classifier
 
 
 # ---- TestGraphRegistry ----

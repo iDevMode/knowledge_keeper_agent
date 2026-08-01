@@ -1,13 +1,20 @@
 import json
 import logging
-from typing import Any, Dict
+import re
+from typing import Any, Dict, List
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from pydantic import ValidationError
 
+from agents.parsing import ClassifierParseError, extract_json
+from agents.text_utils import enforce_single_question, validate_single_question
 from agents.stage1_business_interview.prompts import (
     BLOCK_QUESTIONS,
+    FIELD_LABELS,
     GREETING_MESSAGE,
+    PROFILE_CLARIFICATION_MESSAGE_TEMPLATE,
+    PROFILE_GENERATION_GIVE_UP_MESSAGE,
     PROFILE_GENERATION_INSTRUCTION,
     PROFILE_REVIEW_MESSAGE_TEMPLATE,
     SESSION_CLOSE_MESSAGE,
@@ -16,7 +23,12 @@ from agents.stage1_business_interview.prompts import (
 )
 from agents.stage1_business_interview.state import Stage1State
 from api.session_manager import get_session_store
-from config.constants import MAX_FOLLOWUPS_PER_QUESTION, STAGE1_BLOCKS, STAGE1_BLOCK_QUESTION_COUNTS
+from config.constants import (
+    MAX_FOLLOWUPS_PER_QUESTION,
+    MAX_PROFILE_GENERATION_ATTEMPTS,
+    STAGE1_BLOCKS,
+    STAGE1_BLOCK_QUESTION_COUNTS,
+)
 from config.settings import settings
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -39,12 +51,32 @@ def _get_classifier_llm() -> ChatAnthropic:
     )
 
 
-def validate_single_question(text: str) -> bool:
-    """Check that the text contains at most one question mark.
+def _single_question_or_retry(llm, messages, response_text: str, session_id: str) -> str:
+    """Re-prompt once if the response has multiple questions, then enforce.
 
-    Returns True if valid (0 or 1 question marks).
+    Previously the retry's output was used without re-checking, so a model that
+    ignored the re-prompt still shipped multiple questions to the user — the
+    node-level enforcement CLAUDE.md requires was effectively advisory.
     """
-    return text.count("?") <= 1
+    if validate_single_question(response_text):
+        return response_text
+
+    logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
+    retry_messages = [
+        *messages,
+        AIMessage(content=response_text),
+        HumanMessage(content=SINGLE_QUESTION_REPROMPT),
+    ]
+    retried = llm.invoke(retry_messages).content
+
+    if validate_single_question(retried):
+        return retried
+
+    logger.warning(
+        "session=%s Re-prompt still returned multiple questions — truncating to the first",
+        session_id,
+    )
+    return enforce_single_question(retried)
 
 
 def greeting_node(state: Stage1State) -> Dict[str, Any]:
@@ -52,7 +84,11 @@ def greeting_node(state: Stage1State) -> Dict[str, Any]:
     logger.info("session=%s stage=1 node=greeting", state.get("session_id", ""))
     return {
         "current_block": STAGE1_BLOCKS[0],
-        "current_question_index": 1,  # greeting covers q0 of business_context
+        # The greeting text *is* question 0, and process_answer runs before
+        # ask_question. Index must therefore stay at 0 so the answer to the
+        # greeting is filed under business_context.0; advance_question then
+        # moves to 1. Setting 1 here filed that answer as .1 and skipped q1.
+        "current_question_index": 0,
         "conversation_history": [AIMessage(content=GREETING_MESSAGE)],
         "last_agent_message": GREETING_MESSAGE,
         "followup_count": 0,
@@ -91,13 +127,7 @@ def ask_question_node(state: Stage1State) -> Dict[str, Any]:
     response = llm.invoke(messages)
     response_text = response.content
 
-    # Validate single question — retry once if needed
-    if not validate_single_question(response_text):
-        logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = _single_question_or_retry(llm, messages, response_text, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
@@ -186,10 +216,21 @@ Respond with ONLY a JSON object (no markdown, no explanation):
     try:
         llm = _get_classifier_llm()
         response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = json.loads(response.content.strip())
+        result = extract_json(response.content)
+
+        if not isinstance(result, dict):
+            raise ClassifierParseError(f"expected a JSON object, got {type(result).__name__}")
 
         if result.get("needs_followup", False):
             return {"pending_followup": result.get("suggested_followup", "")}
+        return {"pending_followup": None}
+    except ClassifierParseError as e:
+        # Distinct from "the model said no": this is us failing to read the
+        # answer, which silently disables follow-ups if it goes unnoticed.
+        logger.error(
+            "session=%s stage=1 followup classifier response UNPARSEABLE: %s "
+            "— defaulting to no followup", session_id, e,
+        )
         return {"pending_followup": None}
     except Exception as e:
         # Default to no follow-up on classifier failure
@@ -222,11 +263,7 @@ def followup_question_node(state: Stage1State) -> Dict[str, Any]:
     response = llm.invoke(messages)
     response_text = response.content
 
-    if not validate_single_question(response_text):
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = _single_question_or_retry(llm, messages, response_text, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
@@ -282,10 +319,44 @@ def advance_question_node(state: Stage1State) -> Dict[str, Any]:
     }
 
 
+def _extract_failed_fields(exc: Exception) -> List[str]:
+    """Best-effort extraction of the profile fields that failed validation.
+
+    with_structured_output may surface the ValidationError directly or wrap it,
+    so the exception chain is inspected before falling back to scanning the
+    message text for known field names.
+    """
+    for candidate in (exc, exc.__cause__, exc.__context__):
+        if isinstance(candidate, ValidationError):
+            return sorted(
+                {".".join(str(part) for part in err["loc"]) for err in candidate.errors()}
+            )
+
+    text = str(exc)
+    return sorted({name for name in RoleIntelligenceProfile.model_fields if name in text})
+
+
+def _describe_fields(field_names: List[str]) -> str:
+    """Render field names as a manager-readable bulleted list."""
+    return "\n".join(
+        f"- {FIELD_LABELS.get(name, name.replace('_', ' ').capitalize())}"
+        for name in field_names
+    )
+
+
 def profile_generation_node(state: Stage1State) -> Dict[str, Any]:
-    """Generate the Role Intelligence Profile from all collected answers."""
+    """Generate the Role Intelligence Profile from all collected answers.
+
+    On validation failure this records the offending field names in state rather
+    than raising. The graph then routes to profile_clarification, which asks the
+    manager to supply them — CLAUDE.md requires surfacing the specific validation
+    errors and asking, and explicitly forbids silently filling defaults.
+    """
     session_id = state.get("session_id", "")
-    logger.info("session=%s stage=1 node=profile_generation", session_id)
+    attempts = state.get("profile_generation_attempts", 0) + 1
+    logger.info(
+        "session=%s stage=1 node=profile_generation attempt=%d", session_id, attempts
+    )
 
     llm = _get_primary_llm()
 
@@ -312,11 +383,47 @@ def profile_generation_node(state: Stage1State) -> Dict[str, Any]:
         try:
             profile = structured_llm.invoke(messages)
         except Exception as second_error:
-            logger.error("session=%s Profile generation failed on retry: %s", session_id, second_error)
-            raise
+            failed_fields = _extract_failed_fields(second_error)
+            logger.error(
+                "session=%s stage=1 profile generation failed on retry "
+                "(attempt=%d) fields=%s: %s",
+                session_id, attempts, failed_fields, second_error,
+            )
+            return {
+                "profile_generation_errors": failed_fields or ["unknown"],
+                "profile_generation_attempts": attempts,
+            }
 
     return {
         "role_intelligence_profile": profile,
+        "profile_generation_errors": [],
+        "profile_generation_attempts": attempts,
+    }
+
+
+def profile_clarification_node(state: Stage1State) -> Dict[str, Any]:
+    """Ask the manager to supply the details that failed profile validation."""
+    session_id = state.get("session_id", "")
+    failed_fields = state.get("profile_generation_errors", [])
+    attempts = state.get("profile_generation_attempts", 0)
+
+    logger.info(
+        "session=%s stage=1 node=profile_clarification attempt=%d fields=%s",
+        session_id, attempts, failed_fields,
+    )
+
+    if attempts >= MAX_PROFILE_GENERATION_ATTEMPTS:
+        message = PROFILE_GENERATION_GIVE_UP_MESSAGE.format(
+            fields=_describe_fields(failed_fields)
+        )
+    else:
+        message = PROFILE_CLARIFICATION_MESSAGE_TEMPLATE.format(
+            fields=_describe_fields(failed_fields)
+        )
+
+    return {
+        "conversation_history": [AIMessage(content=message)],
+        "last_agent_message": message,
     }
 
 
@@ -409,11 +516,18 @@ def corrections_node(state: Stage1State) -> Dict[str, Any]:
         f"The manager has reviewed the Role Intelligence Profile and provided corrections:\n\n"
         f'"{corrections}"\n\n'
         f"Here is the current profile:\n{profile_json}\n\n"
-        "Apply the corrections and return the updated profile as valid JSON."
+        "Apply the corrections and return the updated profile as valid JSON. "
+        "The full interview conversation is included above — use it to resolve "
+        "any reference the manager makes to something discussed earlier. Change "
+        "only what the correction asks for; leave every other field as it is."
     )
 
+    # The interview transcript is included so corrections that refer back to the
+    # conversation ("change it to what I said about the CFO") can be resolved.
+    # Without it the model saw only the profile JSON and the correction text.
     messages = [
         SystemMessage(content=STAGE1_SYSTEM_PROMPT),
+        *state["conversation_history"],
         SystemMessage(content=instruction),
     ]
 
@@ -452,8 +566,22 @@ def finalise_node(state: Stage1State) -> Dict[str, Any]:
 
 
 def session_close_node(state: Stage1State) -> Dict[str, Any]:
-    """Output the closing message and mark session complete."""
+    """Output the closing message and mark session complete.
+
+    The standard close promises a Stage 2 link for the employee. That promise is
+    only true when a profile was actually confirmed — reaching here without one
+    means profile generation was abandoned, and the clarification node has
+    already explained that. Do not overwrite it with a cheerful close.
+    """
     session_id = state.get("session_id", "")
+
+    if not state.get("profile_confirmed"):
+        logger.warning(
+            "session=%s stage=1 node=session_close closing WITHOUT a confirmed profile",
+            session_id,
+        )
+        return {"session_complete": True}
+
     logger.info("session=%s stage=1 node=session_close", session_id)
 
     return {
@@ -482,8 +610,85 @@ def route_after_advance(state: Stage1State) -> str:
     return "ask_question"
 
 
+def route_after_profile_generation(state: Stage1State) -> str:
+    """Route to review on success, or to clarification when validation failed."""
+    if state.get("profile_generation_errors"):
+        return "profile_clarification"
+    return "profile_review"
+
+
+def route_after_clarification(state: Stage1State) -> str:
+    """Retry generation with the manager's extra detail, or stop trying.
+
+    After MAX_PROFILE_GENERATION_ATTEMPTS the loop ends rather than asking the
+    manager the same thing forever. The session closes without a confirmed
+    profile, which is a visible, explainable outcome — unlike the previous
+    behaviour of raising an unhandled 500 mid-conversation.
+    """
+    if state.get("profile_generation_attempts", 0) >= MAX_PROFILE_GENERATION_ATTEMPTS:
+        return "session_close"
+    return "profile_generation"
+
+
+def _normalise_reply(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace."""
+    return " ".join(re.sub(r"[^a-z0-9\s]", " ", text.strip().lower()).split())
+
+
+# Phrases that unambiguously confirm the profile. Several contain words that are
+# also correction cues ("change", "corrections"), so these are removed from the
+# message before cue scanning — otherwise "nothing to change" reads as a change.
+# Run through _normalise_reply so punctuation variants ("that's" vs "thats")
+# cannot drift out of sync with how replies are normalised.
+_CONFIRMATION_PHRASES = tuple(
+    _normalise_reply(p)
+    for p in (
+        "nothing to change",
+        "no changes",
+        "no corrections",
+        "nothing to add",
+        "nothing missing",
+        "all correct",
+        "all good",
+        "looks good",
+        "looks correct",
+        "looks right",
+        "that's correct",
+        "that is correct",
+        "that's right",
+        "that is right",
+        "sounds right",
+        "sounds good",
+        "spot on",
+        "lgtm",
+    )
+)
+
+# Single words that, on their own, read as agreement.
+_AFFIRMATIVE_WORDS = frozenset(
+    {"yes", "yep", "yeah", "correct", "confirmed", "confirm", "approved",
+     "perfect", "great", "fine", "good", "ok", "okay"}
+)
+
+# Cues that the manager is asking for something to be different. Presence of any
+# of these means we route to corrections even alongside an affirmation, because
+# "yes, but change X" is a correction, not a confirmation.
+_CORRECTION_CUES = frozenset(
+    {"but", "however", "although", "though", "except", "actually", "instead",
+     "change", "changed", "correct_that", "amend", "update", "add", "remove",
+     "delete", "replace", "swap", "fix", "wrong", "incorrect", "missing",
+     "should", "shouldn't", "isn't", "not", "rather"}
+)
+
+
 def route_after_profile_review(state: Stage1State) -> str:
-    """Route to corrections or finalise based on user response."""
+    """Route to corrections or finalise based on the manager's reply.
+
+    Deliberately biased towards `corrections`: re-presenting the profile is
+    recoverable, whereas finalising discards the manager's edit and completes the
+    session irreversibly. A bare substring scan previously routed
+    "yes, but change the job title" to finalise and dropped the correction.
+    """
     history = state["conversation_history"]
     last_human = None
     for msg in reversed(history):
@@ -492,18 +697,30 @@ def route_after_profile_review(state: Stage1State) -> str:
             break
 
     if last_human is None:
+        # No reply to evaluate — do not finalise on the manager's behalf.
+        return "corrections"
+
+    normalised = _normalise_reply(last_human)
+
+    # Strip whole confirmation phrases first so their internal words ("change",
+    # "corrections") are not mistaken for correction cues.
+    residue = normalised
+    has_confirmation_phrase = False
+    for phrase in _CONFIRMATION_PHRASES:
+        if phrase in residue:
+            has_confirmation_phrase = True
+            residue = residue.replace(phrase, " ")
+
+    residue_words = set(residue.split())
+    if residue_words & _CORRECTION_CUES:
+        return "corrections"
+
+    if has_confirmation_phrase:
         return "finalise"
 
-    # Simple heuristic: if the response looks like a confirmation, finalise
-    confirmation_signals = [
-        "looks good", "looks correct", "that's correct", "that's right",
-        "all good", "perfect", "yes", "confirm", "no changes", "nothing to change",
-        "all correct", "spot on", "no corrections", "approved", "lgtm",
-    ]
-    normalised = last_human.strip().lower().rstrip(".!,")
-
-    for signal in confirmation_signals:
-        if signal in normalised:
-            return "finalise"
+    # Otherwise only a short, purely affirmative reply counts as confirmation.
+    words = normalised.split()
+    if words and len(words) <= 4 and (set(words) & _AFFIRMATIVE_WORDS):
+        return "finalise"
 
     return "corrections"

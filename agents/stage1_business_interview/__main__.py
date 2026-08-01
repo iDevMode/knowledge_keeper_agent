@@ -31,6 +31,8 @@ def run_cli():
         "followup_count": 0,
         "pending_followup": None,
         "last_agent_message": "",
+        "profile_generation_errors": [],
+        "profile_generation_attempts": 0,
     }
 
     print("\n" + "=" * 60)

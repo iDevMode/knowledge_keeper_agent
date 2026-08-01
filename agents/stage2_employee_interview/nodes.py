@@ -1,10 +1,11 @@
-import json
 import logging
 from typing import Any, Dict
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from agents.parsing import ClassifierParseError, extract_json
+from agents.text_utils import enforce_single_question, validate_single_question
 from agents.stage2_employee_interview.prompts import (
     BLOCK_QUESTIONS,
     CLOSING_MESSAGE,
@@ -23,6 +24,7 @@ from config.constants import (
     STAGE2_BLOCK_QUESTION_COUNTS,
     STAGE2_CLOSING_QUESTION_COUNT,
     STAGE2_ROLE_ORIENTATION_QUESTION_COUNT,
+    BlockDepth,
     KnowledgeBlock,
 )
 from config.settings import settings
@@ -48,9 +50,32 @@ def _get_classifier_llm() -> ChatAnthropic:
     )
 
 
-def validate_single_question(text: str) -> bool:
-    """Check that the text contains at most one question mark."""
-    return text.count("?") <= 1
+def _single_question_or_retry(llm, messages, response_text: str, session_id: str) -> str:
+    """Re-prompt once if the response has multiple questions, then enforce.
+
+    Previously the retry's output was used without re-checking, so a model that
+    ignored the re-prompt still shipped multiple questions to the user — the
+    node-level enforcement CLAUDE.md requires was effectively advisory.
+    """
+    if validate_single_question(response_text):
+        return response_text
+
+    logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
+    retry_messages = [
+        *messages,
+        AIMessage(content=response_text),
+        HumanMessage(content=SINGLE_QUESTION_REPROMPT),
+    ]
+    retried = llm.invoke(retry_messages).content
+
+    if validate_single_question(retried):
+        return retried
+
+    logger.warning(
+        "session=%s Re-prompt still returned multiple questions — truncating to the first",
+        session_id,
+    )
+    return enforce_single_question(retried)
 
 
 def load_profile_node(state: Stage2State) -> Dict[str, Any]:
@@ -76,7 +101,23 @@ def load_profile_node(state: Stage2State) -> Dict[str, Any]:
     block_order = [block.value for block in ordered_blocks]
     block_depths = {block.value: depth.value for block, depth in depth_map.items()}
 
-    logger.info("session=%s stage=2 block_order=%s", session_id, block_order)
+    # undocumented_workarounds is always appended regardless of the manager's
+    # ranking, so a block_order of just that one block means every ranked
+    # priority failed to resolve — the interview would cover none of what the
+    # manager actually asked for. Surface it rather than running a hollow session.
+    full_depth_blocks = [b for b, d in depth_map.items() if d == BlockDepth.FULL]
+    if len(full_depth_blocks) <= 1:
+        logger.error(
+            "session=%s stage=2 NO ranked priorities resolved from profile "
+            "(priority_1=%r priority_2=%r priority_3=%r) — Stage 2 would cover "
+            "only undocumented_workarounds",
+            session_id, profile.priority_1, profile.priority_2, profile.priority_3,
+        )
+
+    logger.info(
+        "session=%s stage=2 block_order=%s depths=%s",
+        session_id, block_order, block_depths,
+    )
 
     return {
         "profile": profile,
@@ -97,7 +138,11 @@ def greeting_node(state: Stage2State) -> Dict[str, Any]:
     return {
         "current_phase": "role_orientation",
         "current_block": "role_orientation",
-        "current_question_index": 1,  # greeting covers q0
+        # The greeting text *is* role_orientation question 0, and process_answer
+        # runs before ask_question. Index must stay at 0 so that answer is filed
+        # under role_orientation.0; advance_question then moves to 1. Setting 1
+        # here filed it as .1 and skipped q1 ("what does a typical week look like").
+        "current_question_index": 0,
         "current_block_index": 0,
         "conversation_history": [AIMessage(content=greeting)],
         "last_agent_message": greeting,
@@ -148,12 +193,7 @@ def ask_question_node(state: Stage2State) -> Dict[str, Any]:
     response = llm.invoke(messages)
     response_text = response.content
 
-    if not validate_single_question(response_text):
-        logger.warning("session=%s Multiple questions detected, re-prompting", session_id)
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = _single_question_or_retry(llm, messages, response_text, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],
@@ -217,10 +257,13 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
     try:
         llm = _get_classifier_llm()
         response = llm.invoke([HumanMessage(content=prompt)])
-        raw = response.content.strip()
 
-        flags_data = json.loads(raw)
+        flags_data = extract_json(response.content)
         if not isinstance(flags_data, list):
+            logger.warning(
+                "session=%s stage=2 risk classifier returned %s, expected a list "
+                "— treating as no flags", session_id, type(flags_data).__name__,
+            )
             flags_data = []
 
         new_flags = []
@@ -239,12 +282,33 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
                 session_id, flag.flag_type, flag.severity, block,
             )
 
-        existing_flags = list(state.get("risk_flags", []))
-        return {"risk_flags": existing_flags + new_flags}
+        # Return ONLY the new flags — the operator.add reducer on risk_flags
+        # appends them. Returning existing + new would double-count, and under
+        # parallel execution a read-modify-write here would lose flags.
+        return {"risk_flags": new_flags}
 
+    except ClassifierParseError as e:
+        # Risk detection is a headline feature; an unreadable response must not
+        # look the same in the logs as "no risks in this answer".
+        logger.error(
+            "session=%s stage=2 risk classifier response UNPARSEABLE: %s "
+            "— no flags recorded for this answer", session_id, e,
+        )
+        return {}
     except Exception as e:
         logger.warning("session=%s Risk flag classifier failed: %s — returning unchanged", session_id, e)
         return {}
+
+
+def classifiers_complete_node(state: Stage2State) -> Dict[str, Any]:
+    """Join point for the two parallel classifier branches.
+
+    risk_flag_classifier and followup_classifier both fan out from
+    process_answer and run concurrently. This node exists so the graph has an
+    explicit fan-in: it runs once both branches have completed, and routing to
+    the next question happens from here. It writes no state.
+    """
+    return {}
 
 
 def followup_classifier_node(state: Stage2State) -> Dict[str, Any]:
@@ -301,10 +365,19 @@ Respond with ONLY a JSON object (no markdown, no explanation):
     try:
         llm = _get_classifier_llm()
         response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = json.loads(response.content.strip())
+        result = extract_json(response.content)
+
+        if not isinstance(result, dict):
+            raise ClassifierParseError(f"expected a JSON object, got {type(result).__name__}")
 
         if result.get("needs_followup", False):
             return {"pending_followup": result.get("suggested_followup", "")}
+        return {"pending_followup": None}
+    except ClassifierParseError as e:
+        logger.error(
+            "session=%s stage=2 followup classifier response UNPARSEABLE: %s "
+            "— defaulting to no followup", session_id, e,
+        )
         return {"pending_followup": None}
     except Exception as e:
         logger.warning("session=%s Followup classifier failed: %s — defaulting to no followup", session_id, e)
@@ -337,11 +410,7 @@ def followup_question_node(state: Stage2State) -> Dict[str, Any]:
     response = llm.invoke(messages)
     response_text = response.content
 
-    if not validate_single_question(response_text):
-        messages.append(AIMessage(content=response_text))
-        messages.append(HumanMessage(content=SINGLE_QUESTION_REPROMPT))
-        response = llm.invoke(messages)
-        response_text = response.content
+    response_text = _single_question_or_retry(llm, messages, response_text, session_id)
 
     return {
         "conversation_history": [AIMessage(content=response_text)],

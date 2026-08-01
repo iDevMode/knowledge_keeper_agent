@@ -20,3 +20,8 @@ class Stage1State(TypedDict):
     followup_count: int
     pending_followup: Optional[str]
     last_agent_message: str
+    # Field names that failed validation on the last profile generation attempt.
+    # Empty/absent means the profile validated and can go to review.
+    profile_generation_errors: List[str]
+    # Number of profile generation attempts made, to bound the clarification loop.
+    profile_generation_attempts: int

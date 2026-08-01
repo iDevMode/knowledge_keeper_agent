@@ -89,6 +89,11 @@ STAGE1_BLOCK_QUESTION_COUNTS = {
 
 MAX_FOLLOWUPS_PER_QUESTION = 3
 
+# How many times profile generation may ask the manager to clarify missing
+# fields before giving up. Bounds the profile_generation -> profile_clarification
+# loop so a manager who cannot supply a required field never gets stuck.
+MAX_PROFILE_GENERATION_ATTEMPTS = 3
+
 # Stage 2 constants
 STAGE2_ROLE_ORIENTATION_QUESTION_COUNT = 5
 STAGE2_CLOSING_QUESTION_COUNT = 4
