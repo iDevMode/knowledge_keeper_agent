@@ -116,6 +116,12 @@ Cross-referencing between sections (e.g. a risk flag in Section 2 referencing a 
 **Why Redis for session state between stages?**
 The gap between Stage 1 and Stage 2 could be hours or days (the manager completes Stage 1, then shares the link with the employee). Redis with a TTL handles this naturally without keeping a database connection warm.
 
+**Why stage-scoped signed tokens rather than unguessable session URLs?**
+The Stage 2 link is *designed to be forwarded to the departing employee*, so a capability-URL model makes the link itself the credential — and it was the manager's session id. Anyone holding it could read and write the manager's Stage 1 interview, and could generate and download the handover pack including the Risk Summary written about them. Tokens are HMAC-signed with `API_SECRET_KEY`, carry `{session_id, scope, exp}`, and come in two scopes: `manager` (authorises its own session and the linked one, plus generate/download) and `employee` (that one session only, never the document). See `api/auth.py`.
+
+**Why does the manager create the employee's session?**
+Minting an employee token requires proving you are the manager. The employee's browser therefore no longer creates the Stage 2 session — it opens a link the manager generated, carrying a token scoped to that session alone.
+
 ---
 
 ## USEFUL COMMANDS
