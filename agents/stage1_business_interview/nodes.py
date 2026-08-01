@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any, Dict
 
 from langchain_anthropic import ChatAnthropic
@@ -486,8 +487,65 @@ def route_after_advance(state: Stage1State) -> str:
     return "ask_question"
 
 
+def _normalise_reply(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace."""
+    return " ".join(re.sub(r"[^a-z0-9\s]", " ", text.strip().lower()).split())
+
+
+# Phrases that unambiguously confirm the profile. Several contain words that are
+# also correction cues ("change", "corrections"), so these are removed from the
+# message before cue scanning — otherwise "nothing to change" reads as a change.
+# Run through _normalise_reply so punctuation variants ("that's" vs "thats")
+# cannot drift out of sync with how replies are normalised.
+_CONFIRMATION_PHRASES = tuple(
+    _normalise_reply(p)
+    for p in (
+        "nothing to change",
+        "no changes",
+        "no corrections",
+        "nothing to add",
+        "nothing missing",
+        "all correct",
+        "all good",
+        "looks good",
+        "looks correct",
+        "looks right",
+        "that's correct",
+        "that is correct",
+        "that's right",
+        "that is right",
+        "sounds right",
+        "sounds good",
+        "spot on",
+        "lgtm",
+    )
+)
+
+# Single words that, on their own, read as agreement.
+_AFFIRMATIVE_WORDS = frozenset(
+    {"yes", "yep", "yeah", "correct", "confirmed", "confirm", "approved",
+     "perfect", "great", "fine", "good", "ok", "okay"}
+)
+
+# Cues that the manager is asking for something to be different. Presence of any
+# of these means we route to corrections even alongside an affirmation, because
+# "yes, but change X" is a correction, not a confirmation.
+_CORRECTION_CUES = frozenset(
+    {"but", "however", "although", "though", "except", "actually", "instead",
+     "change", "changed", "correct_that", "amend", "update", "add", "remove",
+     "delete", "replace", "swap", "fix", "wrong", "incorrect", "missing",
+     "should", "shouldn't", "isn't", "not", "rather"}
+)
+
+
 def route_after_profile_review(state: Stage1State) -> str:
-    """Route to corrections or finalise based on user response."""
+    """Route to corrections or finalise based on the manager's reply.
+
+    Deliberately biased towards `corrections`: re-presenting the profile is
+    recoverable, whereas finalising discards the manager's edit and completes the
+    session irreversibly. A bare substring scan previously routed
+    "yes, but change the job title" to finalise and dropped the correction.
+    """
     history = state["conversation_history"]
     last_human = None
     for msg in reversed(history):
@@ -496,18 +554,30 @@ def route_after_profile_review(state: Stage1State) -> str:
             break
 
     if last_human is None:
+        # No reply to evaluate — do not finalise on the manager's behalf.
+        return "corrections"
+
+    normalised = _normalise_reply(last_human)
+
+    # Strip whole confirmation phrases first so their internal words ("change",
+    # "corrections") are not mistaken for correction cues.
+    residue = normalised
+    has_confirmation_phrase = False
+    for phrase in _CONFIRMATION_PHRASES:
+        if phrase in residue:
+            has_confirmation_phrase = True
+            residue = residue.replace(phrase, " ")
+
+    residue_words = set(residue.split())
+    if residue_words & _CORRECTION_CUES:
+        return "corrections"
+
+    if has_confirmation_phrase:
         return "finalise"
 
-    # Simple heuristic: if the response looks like a confirmation, finalise
-    confirmation_signals = [
-        "looks good", "looks correct", "that's correct", "that's right",
-        "all good", "perfect", "yes", "confirm", "no changes", "nothing to change",
-        "all correct", "spot on", "no corrections", "approved", "lgtm",
-    ]
-    normalised = last_human.strip().lower().rstrip(".!,")
-
-    for signal in confirmation_signals:
-        if signal in normalised:
-            return "finalise"
+    # Otherwise only a short, purely affirmative reply counts as confirmation.
+    words = normalised.split()
+    if words and len(words) <= 4 and (set(words) & _AFFIRMATIVE_WORDS):
+        return "finalise"
 
     return "corrections"
