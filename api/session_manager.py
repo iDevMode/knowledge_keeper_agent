@@ -67,6 +67,26 @@ class InMemorySessionStore:
             return None
         return RoleIntelligenceProfile.model_validate(data)
 
+    def sweep_expired(self) -> int:
+        """Drop expired sessions and their links and profiles.
+
+        Expiry was previously only applied lazily on next access, so a session
+        that was abandoned — the common case for an interview someone never
+        finishes — stayed resident forever along with its profile.
+
+        Returns the number of sessions removed.
+        """
+        expired = [sid for sid in list(self._sessions) if self._is_expired(sid)]
+
+        for session_id in expired:
+            self._sessions.pop(session_id, None)
+            self._profiles.pop(session_id, None)
+            linked = self._links.pop(session_id, None)
+            if linked is not None:
+                self._links.pop(linked, None)
+
+        return len(expired)
+
 
 _store: InMemorySessionStore | None = None
 
