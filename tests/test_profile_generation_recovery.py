@@ -1,4 +1,4 @@
-"""Profile generation failure handling (review finding H4).
+﻿"""Profile generation failure handling (review finding H4).
 
 RoleIntelligenceProfile has 22 required fields. If the manager skips or answers
 "I don't know" to enough questions, with_structured_output raises and the node
@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.api_client import AuthedTestClient
 from pydantic import ValidationError
 
 from config.constants import MAX_PROFILE_GENERATION_ATTEMPTS
@@ -51,7 +51,7 @@ def reset_singletons():
 @pytest.fixture
 def client():
     from api.routes import app
-    return TestClient(app)
+    return AuthedTestClient(app)
 
 
 def _make_llms(structured_side_effect):
@@ -84,7 +84,7 @@ def _patched(primary, classifier):
     return stack
 
 
-def _drive_to_generation(client: TestClient, session_id: str) -> dict:
+def _drive_to_generation(client: AuthedTestClient, session_id: str) -> dict:
     """Answer questions until the agent stops asking interview questions."""
     last = None
     for i in range(MAX_INTERVIEW_TURNS):

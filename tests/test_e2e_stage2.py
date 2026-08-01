@@ -1,8 +1,8 @@
-"""End-to-end Stage 2 tests driving the real graph through the API.
+﻿"""End-to-end Stage 2 tests driving the real graph through the API.
 
 Existing Stage 2 coverage force-set completion via graph.update_state(), so the
-interview loop itself — block ordering, depth handling, answer indexing, risk
-flag accumulation, phase transitions — was never exercised end to end. These
+interview loop itself â€” block ordering, depth handling, answer indexing, risk
+flag accumulation, phase transitions â€” was never exercised end to end. These
 tests drive it for real with mocked LLMs.
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.api_client import AuthedTestClient
 
 from config.constants import (
     LIGHT_TOUCH_MAX_QUESTIONS,
@@ -54,7 +54,7 @@ def _expected_question_count(block_order, block_depths) -> int:
 
 
 def _make_classifier(detect_risk: bool):
-    """One mock serves both classifiers — they share _get_classifier_llm.
+    """One mock serves both classifiers â€” they share _get_classifier_llm.
 
     The two callers expect different shapes (follow-up wants an object, risk
     wants an array), so the response is chosen from the prompt text.
@@ -99,7 +99,7 @@ def reset_singletons():
 @pytest.fixture
 def client():
     from api.routes import app
-    return TestClient(app)
+    return AuthedTestClient(app)
 
 
 def _stage2_llms(detect_risk: bool = False):
@@ -115,13 +115,14 @@ def _stage2_llms(detect_risk: bool = False):
     return stack
 
 
-def _start_stage2(client: TestClient, profile_id: str = "process_heavy"):
+def _start_stage2(client: AuthedTestClient, profile_id: str = "process_heavy"):
     """Create a Stage 1 session with a stored profile, then open Stage 2."""
     from api.session_manager import get_session_store
 
     store = get_session_store()
     stage1_id = store.create_session(stage=1)
     store.store_profile(stage1_id, _load_profile(profile_id))
+    client.adopt(stage1_id)
 
     response = client.post("/api/sessions/stage2", json={"stage1_session_id": stage1_id})
     assert response.status_code == 200, response.text
@@ -135,7 +136,7 @@ def _state(session_id: str) -> dict:
     return instance.graph.get_state(instance.config).values
 
 
-def _run_to_completion(client: TestClient, session_id: str) -> int:
+def _run_to_completion(client: AuthedTestClient, session_id: str) -> int:
     """Answer until the session completes. Returns the number of turns taken."""
     for turn in range(1, MAX_TURNS + 1):
         res = client.post(
@@ -158,7 +159,7 @@ class TestStage2ProfileHandoff:
         assert state["profile"].job_title == "Senior Operations Coordinator"
 
     def test_block_order_reflects_the_managers_ranked_priorities(self, client):
-        """Regression guard for H2 — priorities must survive into the interview plan."""
+        """Regression guard for H2 â€” priorities must survive into the interview plan."""
         with _stage2_llms():
             session_id, _ = _start_stage2(client)
 
@@ -181,6 +182,7 @@ class TestStage2ProfileHandoff:
         from api.session_manager import get_session_store
 
         orphan = get_session_store().create_session(stage=1)
+        client.adopt(orphan)
         response = client.post("/api/sessions/stage2", json={"stage1_session_id": orphan})
 
         assert response.status_code == 400

@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 import os
 import tempfile
@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.api_client import AuthedTestClient
 from langchain_core.messages import AIMessage, HumanMessage
 
 from models.role_intelligence_profile import RoleIntelligenceProfile
@@ -45,9 +45,17 @@ def reset_singletons():
     # Reset session store
     sm_mod._store = None
 
-    # Reset graph registry and document store
+    # Reset graph registry and document state. These are cleared in place
+    # rather than rebound, so the document-ownership map stays the same object
+    # the auth dependency reads — a rebind here would leave stale entries
+    # visible to require_document_access.
     routes_mod._registry = routes_mod.GraphRegistry()
-    routes_mod._document_store = {}
+    routes_mod._document_store.clear()
+    routes_mod._document_owner.clear()
+    routes_mod._session_document.clear()
+    routes_mod._session_generation_error.clear()
+    routes_mod._generation_jobs.clear()
+    routes_mod._document_created_at.clear()
 
     yield
 
@@ -55,7 +63,7 @@ def reset_singletons():
 @pytest.fixture
 def client():
     from api.routes import app
-    return TestClient(app)
+    return AuthedTestClient(app)
 
 
 @pytest.fixture
@@ -160,6 +168,7 @@ class TestCreateStage2:
         stage1_id = store.create_session(stage=1)
         profile = _load_profile()
         store.store_profile(stage1_id, profile)
+        client.adopt(stage1_id)
 
         response = client.post(
             "/api/sessions/stage2",
@@ -176,6 +185,10 @@ class TestCreateStage2:
         assert store.get_linked_session(stage2_id) == stage1_id
 
     def test_rejects_missing_stage1_session(self, client, mock_llms):
+        # A credential is needed to reach the 404 at all: authorisation runs
+        # before the lookup so an anonymous caller cannot tell an absent
+        # session from one that exists.
+        client.adopt("nonexistent-id")
         response = client.post(
             "/api/sessions/stage2",
             json={"stage1_session_id": "nonexistent-id"},
@@ -186,6 +199,7 @@ class TestCreateStage2:
         from api.session_manager import get_session_store
         store = get_session_store()
         stage1_id = store.create_session(stage=1)
+        client.adopt(stage1_id)
         # No profile stored
 
         response = client.post(
@@ -213,7 +227,17 @@ class TestSendMessage:
         assert "message" in data
         assert "session_complete" in data
 
+    def test_rejects_unauthenticated_caller(self, client):
+        # 401 before the session lookup, so an anonymous caller cannot probe
+        # which session ids exist.
+        response = client.post(
+            "/api/sessions/nonexistent/message",
+            json={"message": "hello"},
+        )
+        assert response.status_code == 401
+
     def test_rejects_unknown_session(self, client):
+        client.adopt("nonexistent")
         response = client.post(
             "/api/sessions/nonexistent/message",
             json={"message": "hello"},
@@ -271,6 +295,7 @@ class TestSessionStatus:
         stage1_id = store.create_session(stage=1)
         profile = _load_profile()
         store.store_profile(stage1_id, profile)
+        client.adopt(stage1_id)
 
         create_resp = client.post(
             "/api/sessions/stage2",
@@ -284,7 +309,12 @@ class TestSessionStatus:
         assert "risk_flag_count" in data
         assert isinstance(data["risk_flag_count"], int)
 
+    def test_rejects_unauthenticated_caller(self, client):
+        response = client.get("/api/sessions/nonexistent/status")
+        assert response.status_code == 401
+
     def test_rejects_unknown_session(self, client):
+        client.adopt("nonexistent")
         response = client.get("/api/sessions/nonexistent/status")
         assert response.status_code == 404
 
@@ -301,6 +331,7 @@ class TestGenerateDocument:
         stage1_id = store.create_session(stage=1)
         profile = _load_profile()
         store.store_profile(stage1_id, profile)
+        client.adopt(stage1_id)
 
         create_resp = client.post(
             "/api/sessions/stage2",
@@ -344,6 +375,7 @@ class TestGenerateDocument:
         stage1_id = store.create_session(stage=1)
         profile = _load_profile()
         store.store_profile(stage1_id, profile)
+        client.adopt(stage1_id)
 
         create_resp = client.post(
             "/api/sessions/stage2",
@@ -351,7 +383,7 @@ class TestGenerateDocument:
         )
         session_id = create_resp.json()["session_id"]
 
-        # Don't mark as complete — should be rejected
+        # Don't mark as complete â€” should be rejected
         response = client.post(
             f"/api/sessions/{session_id}/generate",
             json={"format": "docx"},
@@ -383,7 +415,10 @@ class TestDownloadDocument:
         tmp.close()
 
         doc_id = "test-doc-id"
+        owner_session = "owner-session-id"
         routes_mod._document_store[doc_id] = tmp.name
+        routes_mod._document_owner[doc_id] = owner_session
+        client.adopt(owner_session)
 
         try:
             response = client.get(f"/api/documents/{doc_id}")
@@ -392,7 +427,12 @@ class TestDownloadDocument:
         finally:
             os.unlink(tmp.name)
 
+    def test_rejects_unauthenticated_caller(self, client):
+        response = client.get("/api/documents/nonexistent")
+        assert response.status_code == 401
+
     def test_rejects_unknown_document_id(self, client):
+        client.adopt("some-session")
         response = client.get("/api/documents/nonexistent")
         assert response.status_code == 404
 

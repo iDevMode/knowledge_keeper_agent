@@ -1,17 +1,19 @@
 import { useEffect, useState, useRef } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import ChatWindow from '../components/ChatWindow'
 import SessionComplete from '../components/SessionComplete'
 import useChat from '../hooks/useChat'
-import { createStage2Session } from '../api/client'
+import { getSessionStatus, storeToken, getToken } from '../api/client'
 
 export default function Stage2Page() {
-  const { stage1SessionId } = useParams()
-  const [sessionId, setSessionId] = useState(() => {
-    return sessionStorage.getItem(`stage2_session_${stage1SessionId}`)
-  })
+  // The employee's own session id. The manager created this session and shared
+  // the link with a token in it; the employee's browser no longer creates the
+  // session, because doing so meant the link carried the manager's session id.
+  const { sessionId } = useParams()
+  const [searchParams] = useSearchParams()
+
   const [initError, setInitError] = useState(null)
-  const [initializing, setInitializing] = useState(!sessionId)
+  const [initializing, setInitializing] = useState(true)
   const initRef = useRef(false)
 
   const {
@@ -27,16 +29,35 @@ export default function Stage2Page() {
   } = useChat(sessionId)
 
   useEffect(() => {
-    if (initRef.current || sessionId) return
+    if (initRef.current) return
     initRef.current = true
+
+    // Take the token out of the URL and keep it for the rest of the session,
+    // then strip it from the address bar so it does not linger in history, in
+    // a screenshot, or in a Referer header on any outbound link.
+    const urlToken = searchParams.get('t')
+    if (urlToken) {
+      storeToken(sessionId, urlToken)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+
+    if (!getToken(sessionId)) {
+      setInitError(
+        'This interview link is incomplete. Ask your manager to resend it.'
+      )
+      setInitializing(false)
+      return
+    }
 
     async function init() {
       try {
-        const data = await createStage2Session(stage1SessionId)
-        setSessionId(data.session_id)
-        sessionStorage.setItem(`stage2_session_${stage1SessionId}`, data.session_id)
-        addAgentMessage(data.message)
-        setCurrentBlock('role_orientation')
+        // The opening question was produced when the manager created this
+        // session, so it lives in the graph state rather than in a response
+        // the employee ever saw. This also restores the last question after a
+        // page refresh.
+        const status = await getSessionStatus(sessionId)
+        if (status.last_agent_message) addAgentMessage(status.last_agent_message)
+        setCurrentBlock(status.current_block || 'role_orientation')
       } catch (err) {
         setInitError(err.message)
       } finally {
@@ -45,16 +66,7 @@ export default function Stage2Page() {
     }
 
     init()
-  }, [stage1SessionId, sessionId, addAgentMessage, setCurrentBlock])
-
-  // Handle page refresh — session exists in storage but no messages loaded
-  useEffect(() => {
-    if (sessionId && messages.length === 0 && !initializing && !initRef.current) {
-      // Session was restored from sessionStorage but messages are gone
-      // The user will need to continue from where they left off
-      addAgentMessage('Welcome back. Please continue where you left off by sending a message.')
-    }
-  }, [sessionId, messages.length, initializing, addAgentMessage])
+  }, [sessionId, searchParams, addAgentMessage, setCurrentBlock])
 
   if (initializing) {
     return (
@@ -96,9 +108,7 @@ export default function Stage2Page() {
       sessionComplete={sessionComplete}
       title="Stage 2 — Employee Interview"
     >
-      {sessionComplete && (
-        <SessionComplete stage={2} sessionId={sessionId} />
-      )}
+      {sessionComplete && <SessionComplete stage={2} sessionId={sessionId} />}
       {error && (
         <div className="px-6 py-3 bg-red-50 text-red-700 text-sm">
           {error}

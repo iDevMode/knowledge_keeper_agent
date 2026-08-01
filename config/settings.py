@@ -12,7 +12,11 @@ class Settings(BaseSettings):
 
     # Session
     session_ttl_hours: int = 72
-    stage1_to_stage2_link_ttl_hours: int = 168
+    # Must not exceed session_ttl_hours — the employee link cannot outlive the
+    # session behind it. Was 168 against a 72h session TTL, which meant the
+    # link stopped working four days before it claimed to expire. To give the
+    # employee longer, raise BOTH values.
+    stage1_to_stage2_link_ttl_hours: int = 72
 
     # Output
     default_output_format: str = "docx"
@@ -54,8 +58,26 @@ class Settings(BaseSettings):
         errors = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY is not set")
+        if not self.api_secret_key and self.environment != "development":
+            # Session tokens are signed with this. Without it the app falls back
+            # to a per-process key, so every restart silently invalidates every
+            # live interview link.
+            errors.append(
+                "API_SECRET_KEY is not set — session tokens would not survive a restart"
+            )
         if self.allowed_origins == "http://localhost:3000" and self.environment != "development":
             errors.append("ALLOWED_ORIGINS is still set to localhost — set to your production domain")
+        if self.stage1_to_stage2_link_ttl_hours > self.session_ttl_hours:
+            # The employee link cannot outlive the session it points at. With
+            # the defaults (168 vs 72) an employee was told they had a week and
+            # got "Session not found" on day four, and any interview finished
+            # after 72h produced no document because the Role Intelligence
+            # Profile had already been swept.
+            errors.append(
+                f"STAGE1_TO_STAGE2_LINK_TTL_HOURS ({self.stage1_to_stage2_link_ttl_hours}) "
+                f"exceeds SESSION_TTL_HOURS ({self.session_ttl_hours}) — the employee "
+                f"link would outlive the session behind it"
+            )
         if errors:
             for err in errors:
                 print(f"[FATAL] {err}", file=sys.stderr)

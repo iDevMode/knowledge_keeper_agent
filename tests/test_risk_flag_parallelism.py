@@ -1,4 +1,4 @@
-"""Risk classification runs as a parallel branch (review finding M1).
+﻿"""Risk classification runs as a parallel branch (review finding M1).
 
 CLAUDE.md Principle 5: risk flag detection "runs as a parallel LangGraph branch
 on every answer. It does not block the main conversation flow." It was wired in
@@ -12,7 +12,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.api_client import AuthedTestClient
 
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -48,15 +48,16 @@ def reset_singletons():
 @pytest.fixture
 def client():
     from api.routes import app
-    return TestClient(app)
+    return AuthedTestClient(app)
 
 
-def _start_stage2(client: TestClient) -> str:
+def _start_stage2(client: AuthedTestClient) -> str:
     from api.session_manager import get_session_store
 
     store = get_session_store()
     stage1_id = store.create_session(stage=1)
     store.store_profile(stage1_id, _load_profile())
+    client.adopt(stage1_id)
     response = client.post("/api/sessions/stage2", json={"stage1_session_id": stage1_id})
     assert response.status_code == 200, response.text
     return response.json()["session_id"]
@@ -126,7 +127,7 @@ class TestClassifiersRunConcurrently:
 
         assert tracker.peak == 2, (
             f"expected risk and follow-up classifiers to overlap, peak in-flight "
-            f"was {tracker.peak} — they are running in series"
+            f"was {tracker.peak} â€” they are running in series"
         )
 
     def test_turn_latency_is_not_the_sum_of_both_classifiers(self, client):
@@ -171,7 +172,7 @@ class TestRiskFlagAccumulation:
 
         flags = _state(session_id)["risk_flags"]
         assert len(flags) == 3, (
-            f"expected exactly one flag per answer, got {len(flags)} — the node "
+            f"expected exactly one flag per answer, got {len(flags)} â€” the node "
             f"returns only new flags and the reducer appends them"
         )
 

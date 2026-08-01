@@ -1,5 +1,12 @@
-import { useState } from 'react'
-import { generateDocument } from '../api/client'
+import { useEffect, useRef, useState } from 'react'
+import {
+  awaitDocument,
+  createStage2Session,
+  getDownloadUrl,
+  getSessionStatus,
+} from '../api/client'
+
+const POLL_INTERVAL_MS = 5000
 
 function CheckmarkIcon() {
   return (
@@ -17,12 +24,86 @@ function CheckmarkIcon() {
   )
 }
 
+/**
+ * Manager's view once Stage 1 is confirmed.
+ *
+ * This screen now creates the employee's session and mints their token, then
+ * watches that session. Previously it shared a link built from the MANAGER's
+ * session id, which handed the employee a credential for the manager's own
+ * interview.
+ */
 function Stage1Complete({ sessionId, profile }) {
   const [copied, setCopied] = useState(false)
-  const stage2Link = `${window.location.origin}/stage2/${sessionId}`
+  const [link, setLink] = useState(null)
+  const [stage2SessionId, setStage2SessionId] = useState(null)
+  const [linkError, setLinkError] = useState(null)
+
+  const [employeeComplete, setEmployeeComplete] = useState(false)
+  const [downloadUrl, setDownloadUrl] = useState(null)
+  const [documentError, setDocumentError] = useState(null)
+
+  const createdRef = useRef(false)
+
+  useEffect(() => {
+    if (createdRef.current) return
+    createdRef.current = true
+
+    createStage2Session(sessionId)
+      .then((data) => {
+        setStage2SessionId(data.session_id)
+        setLink(
+          `${window.location.origin}/stage2/${data.session_id}` +
+            `?t=${encodeURIComponent(data.employee_token)}`
+        )
+      })
+      .catch((err) => setLinkError(err.message))
+  }, [sessionId])
+
+  // Watch the employee's interview. Stage 3 now starts server-side the moment
+  // it completes, so the manager can collect the pack even if the employee
+  // closed the tab.
+  useEffect(() => {
+    if (!stage2SessionId || downloadUrl) return
+
+    let cancelled = false
+    let timer
+
+    async function poll() {
+      try {
+        const status = await getSessionStatus(stage2SessionId, sessionId)
+        if (cancelled) return
+
+        if (status.session_complete) setEmployeeComplete(true)
+
+        if (status.generation_error) {
+          setDocumentError(
+            `The handover pack could not be generated: ${status.generation_error}`
+          )
+          return
+        }
+
+        if (status.document_id) {
+          const doc = await awaitDocument(status.document_id, sessionId)
+          if (cancelled) return
+          setDownloadUrl(getDownloadUrl(doc.document_id, sessionId))
+          return
+        }
+      } catch (err) {
+        if (!cancelled) setDocumentError(err.message)
+      }
+      if (!cancelled) timer = setTimeout(poll, POLL_INTERVAL_MS)
+    }
+
+    poll()
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [stage2SessionId, sessionId, downloadUrl])
 
   function copyLink() {
-    navigator.clipboard.writeText(stage2Link).then(() => {
+    if (!link) return
+    navigator.clipboard.writeText(link).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
@@ -38,7 +119,6 @@ function Stage1Complete({ sessionId, profile }) {
         The Role Intelligence Profile has been generated. Share the link below with the departing employee to begin their interview.
       </p>
 
-      {/* Profile summary */}
       {profile && (
         <div className="bg-parchment-50 border border-parchment-200 rounded-xl p-4 mb-6 text-sm space-y-1.5">
           <div><span className="text-parchment-500">Role:</span> <span className="text-ink font-medium">{profile.job_title}</span></div>
@@ -50,101 +130,76 @@ function Stage1Complete({ sessionId, profile }) {
         </div>
       )}
 
-      {/* Copy link */}
-      <div className="flex items-center gap-2">
-        <input
-          type="text"
-          value={stage2Link}
-          readOnly
-          className="flex-1 px-3 py-2.5 rounded-lg border border-parchment-300 bg-white text-sm text-ink truncate"
-        />
-        <button
-          onClick={copyLink}
-          className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-keeper-500 text-white text-sm font-medium hover:bg-keeper-400 transition-colors"
-        >
-          {copied ? 'Copied!' : 'Copy Link'}
-        </button>
-      </div>
+      {linkError ? (
+        <p className="text-sm text-red-600 text-center">{linkError}</p>
+      ) : !link ? (
+        <div className="flex items-center justify-center gap-2 py-3 text-sm text-parchment-500">
+          <span className="w-4 h-4 border-2 border-keeper-500/30 border-t-keeper-500 rounded-full animate-spin" />
+          Preparing the employee's link...
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={link}
+              readOnly
+              className="flex-1 px-3 py-2.5 rounded-lg border border-parchment-300 bg-white text-sm text-ink truncate"
+            />
+            <button
+              onClick={copyLink}
+              className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-keeper-500 text-white text-sm font-medium hover:bg-keeper-400 transition-colors"
+            >
+              {copied ? 'Copied!' : 'Copy Link'}
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-parchment-500">
+            This link is personal to the employee and expires. Keep this page — the
+            completed handover pack appears here when their interview finishes.
+          </p>
+        </>
+      )}
+
+      {/* Handover pack */}
+      {link && (
+        <div className="mt-6 pt-6 border-t border-parchment-200">
+          {downloadUrl ? (
+            <a
+              href={downloadUrl}
+              className="block w-full py-3 rounded-xl bg-keeper-500 text-white font-medium text-center hover:bg-keeper-400 transition-colors"
+            >
+              Download Handover Pack
+            </a>
+          ) : documentError ? (
+            <p className="text-sm text-red-600 text-center">{documentError}</p>
+          ) : (
+            <p className="text-sm text-parchment-500 text-center">
+              {employeeComplete
+                ? 'Interview complete — preparing the handover pack...'
+                : 'Waiting for the employee to complete their interview.'}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-function Stage2Complete({ sessionId }) {
-  const [format, setFormat] = useState('docx')
-  const [generating, setGenerating] = useState(false)
-  const [downloadUrl, setDownloadUrl] = useState(null)
-  const [error, setError] = useState(null)
-
-  async function handleGenerate() {
-    setGenerating(true)
-    setError(null)
-    try {
-      const data = await generateDocument(sessionId, format)
-      setDownloadUrl(data.download_url)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setGenerating(false)
-    }
-  }
-
+/**
+ * Employee's view. No generate or download control: the pack contains the Risk
+ * Summary, which is the manager's to read.
+ */
+function Stage2Complete() {
   return (
     <div className="p-6 animate-page-in">
       <CheckmarkIcon />
       <h2 className="font-display text-xl text-ink-heading text-center mb-2">
         Interview Complete
       </h2>
-      <p className="text-sm text-parchment-500 text-center mb-6">
-        Thank you for sharing your knowledge. Generate your handover document below.
+      <p className="text-sm text-parchment-500 text-center">
+        Thank you for sharing your knowledge. Your handover pack is being prepared
+        and sent to your manager — there is nothing more you need to do.
       </p>
-
-      {!downloadUrl ? (
-        <div className="space-y-4">
-          {/* Format picker */}
-          <div className="flex gap-3 justify-center">
-            {['docx', 'pdf'].map((f) => (
-              <button
-                key={f}
-                onClick={() => setFormat(f)}
-                className={`px-5 py-2.5 rounded-lg text-sm font-medium border transition-colors ${
-                  format === f
-                    ? 'border-keeper-500 bg-keeper-500 text-white'
-                    : 'border-parchment-300 bg-white text-ink hover:border-keeper-400'
-                }`}
-              >
-                {f.toUpperCase()}
-              </button>
-            ))}
-          </div>
-
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="w-full py-3 rounded-xl bg-keeper-500 text-white font-medium hover:bg-keeper-400 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-          >
-            {generating ? (
-              <>
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Generating document...
-              </>
-            ) : (
-              'Generate Document'
-            )}
-          </button>
-        </div>
-      ) : (
-        <a
-          href={downloadUrl}
-          download={`KnowledgeKeeper-Handover.${format === 'pdf' ? 'pdf' : 'docx'}`}
-          className="block w-full py-3 rounded-xl bg-keeper-500 text-white font-medium text-center hover:bg-keeper-400 transition-colors"
-        >
-          Download {format.toUpperCase()}
-        </a>
-      )}
-
-      {error && (
-        <p className="mt-3 text-sm text-red-600 text-center">{error}</p>
-      )}
     </div>
   )
 }
@@ -153,5 +208,5 @@ export default function SessionComplete({ stage, sessionId, profile }) {
   if (stage === 1) {
     return <Stage1Complete sessionId={sessionId} profile={profile} />
   }
-  return <Stage2Complete sessionId={sessionId} />
+  return <Stage2Complete />
 }
