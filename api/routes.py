@@ -617,12 +617,14 @@ def create_stage2(
     sweep_resources()
     store = get_session_store()
 
-    # Validate Stage 1 session exists
+    # Authorise BEFORE looking the session up. The other way round, an
+    # anonymous caller gets 404 for an id that does not exist and 401 for one
+    # that does, which enumerates valid Stage 1 session ids.
+    require_manager_access(request.stage1_session_id, authorization)
+
     stage1_session = store.get_session(request.stage1_session_id)
     if not stage1_session:
         raise HTTPException(status_code=404, detail="Stage 1 session not found")
-
-    require_manager_access(request.stage1_session_id, authorization)
 
     # Validate profile exists
     profile = store.get_profile(request.stage1_session_id)

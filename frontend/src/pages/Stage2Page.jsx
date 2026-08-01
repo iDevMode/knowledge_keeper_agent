@@ -32,9 +32,14 @@ export default function Stage2Page() {
     if (initRef.current) return
     initRef.current = true
 
-    // Take the token out of the URL and keep it for the rest of the session.
+    // Take the token out of the URL and keep it for the rest of the session,
+    // then strip it from the address bar so it does not linger in history, in
+    // a screenshot, or in a Referer header on any outbound link.
     const urlToken = searchParams.get('t')
-    if (urlToken) storeToken(sessionId, urlToken)
+    if (urlToken) {
+      storeToken(sessionId, urlToken)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
 
     if (!getToken(sessionId)) {
       setInitError(

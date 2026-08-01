@@ -45,9 +45,16 @@ def reset_singletons():
     # Reset session store
     sm_mod._store = None
 
-    # Reset graph registry and document store
+    # Reset graph registry and document state. These are cleared in place
+    # rather than rebound, so the document-ownership map stays the same object
+    # the auth dependency reads — a rebind here would leave stale entries
+    # visible to require_document_access.
     routes_mod._registry = routes_mod.GraphRegistry()
-    routes_mod._document_store = {}
+    routes_mod._document_store.clear()
+    routes_mod._document_owner.clear()
+    routes_mod._session_document.clear()
+    routes_mod._generation_jobs.clear()
+    routes_mod._document_created_at.clear()
 
     yield
 
@@ -177,6 +184,10 @@ class TestCreateStage2:
         assert store.get_linked_session(stage2_id) == stage1_id
 
     def test_rejects_missing_stage1_session(self, client, mock_llms):
+        # A credential is needed to reach the 404 at all: authorisation runs
+        # before the lookup so an anonymous caller cannot tell an absent
+        # session from one that exists.
+        client.adopt("nonexistent-id")
         response = client.post(
             "/api/sessions/stage2",
             json={"stage1_session_id": "nonexistent-id"},

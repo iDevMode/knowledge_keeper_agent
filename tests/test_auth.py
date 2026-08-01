@@ -218,6 +218,20 @@ class TestEmployeeCannotReachTheManagersInterview:
         )
         assert response.status_code == 401
 
+    def test_stage2_creation_does_not_reveal_which_session_ids_exist(
+        self, client, engagement
+    ):
+        """Authorise before the lookup, or 401-vs-404 enumerates valid ids."""
+        real = client.post(
+            "/api/sessions/stage2",
+            json={"stage1_session_id": engagement["stage1_id"]},
+        )
+        absent = client.post(
+            "/api/sessions/stage2",
+            json={"stage1_session_id": "does-not-exist"},
+        )
+        assert real.status_code == absent.status_code == 401
+
 
 # ---- The document boundary ----
 
