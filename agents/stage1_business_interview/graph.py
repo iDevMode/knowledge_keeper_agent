@@ -10,10 +10,13 @@ from agents.stage1_business_interview.nodes import (
     followup_question_node,
     greeting_node,
     process_answer_node,
+    profile_clarification_node,
     profile_generation_node,
     profile_review_node,
     route_after_advance,
+    route_after_clarification,
     route_after_followup_classifier,
+    route_after_profile_generation,
     route_after_profile_review,
     session_close_node,
 )
@@ -32,6 +35,7 @@ def build_stage1_graph(checkpointer=None):
     builder.add_node("followup_question", followup_question_node)
     builder.add_node("advance_question", advance_question_node)
     builder.add_node("profile_generation", profile_generation_node)
+    builder.add_node("profile_clarification", profile_clarification_node)
     builder.add_node("profile_review", profile_review_node)
     builder.add_node("corrections", corrections_node)
     builder.add_node("finalise", finalise_node)
@@ -66,8 +70,27 @@ def build_stage1_graph(checkpointer=None):
     # ask_question -> process_answer (waiting for user input)
     builder.add_edge("ask_question", "process_answer")
 
-    # profile_generation -> profile_review
-    builder.add_edge("profile_generation", "profile_review")
+    # profile_generation -> profile_review OR profile_clarification
+    # Validation failure is not fatal: the manager is asked for the missing
+    # details rather than the node raising and surfacing a 500 mid-conversation.
+    builder.add_conditional_edges(
+        "profile_generation",
+        route_after_profile_generation,
+        {
+            "profile_review": "profile_review",
+            "profile_clarification": "profile_clarification",
+        },
+    )
+
+    # profile_clarification -> profile_generation (retry) OR session_close (gave up)
+    builder.add_conditional_edges(
+        "profile_clarification",
+        route_after_clarification,
+        {
+            "profile_generation": "profile_generation",
+            "session_close": "session_close",
+        },
+    )
 
     # profile_review -> corrections OR finalise (after user input)
     builder.add_conditional_edges(
@@ -96,10 +119,12 @@ def build_stage1_graph(checkpointer=None):
     #                     immediately re-evaluated against the manager's *previous*
     #                     interview answer, which routes straight back into
     #                     corrections and loops until the process dies.
+    #   profile_clarification — wait for the manager to supply the fields that
+    #                     failed validation before regenerating the profile.
     return builder.compile(
         checkpointer=checkpointer,
         interrupt_before=["process_answer"],
-        interrupt_after=["profile_review"],
+        interrupt_after=["profile_review", "profile_clarification"],
     )
 
 

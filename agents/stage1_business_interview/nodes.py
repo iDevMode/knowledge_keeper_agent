@@ -1,14 +1,18 @@
 import json
 import logging
 import re
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from pydantic import ValidationError
 
 from agents.stage1_business_interview.prompts import (
     BLOCK_QUESTIONS,
+    FIELD_LABELS,
     GREETING_MESSAGE,
+    PROFILE_CLARIFICATION_MESSAGE_TEMPLATE,
+    PROFILE_GENERATION_GIVE_UP_MESSAGE,
     PROFILE_GENERATION_INSTRUCTION,
     PROFILE_REVIEW_MESSAGE_TEMPLATE,
     SESSION_CLOSE_MESSAGE,
@@ -17,7 +21,12 @@ from agents.stage1_business_interview.prompts import (
 )
 from agents.stage1_business_interview.state import Stage1State
 from api.session_manager import get_session_store
-from config.constants import MAX_FOLLOWUPS_PER_QUESTION, STAGE1_BLOCKS, STAGE1_BLOCK_QUESTION_COUNTS
+from config.constants import (
+    MAX_FOLLOWUPS_PER_QUESTION,
+    MAX_PROFILE_GENERATION_ATTEMPTS,
+    STAGE1_BLOCKS,
+    STAGE1_BLOCK_QUESTION_COUNTS,
+)
 from config.settings import settings
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -287,10 +296,44 @@ def advance_question_node(state: Stage1State) -> Dict[str, Any]:
     }
 
 
+def _extract_failed_fields(exc: Exception) -> List[str]:
+    """Best-effort extraction of the profile fields that failed validation.
+
+    with_structured_output may surface the ValidationError directly or wrap it,
+    so the exception chain is inspected before falling back to scanning the
+    message text for known field names.
+    """
+    for candidate in (exc, exc.__cause__, exc.__context__):
+        if isinstance(candidate, ValidationError):
+            return sorted(
+                {".".join(str(part) for part in err["loc"]) for err in candidate.errors()}
+            )
+
+    text = str(exc)
+    return sorted({name for name in RoleIntelligenceProfile.model_fields if name in text})
+
+
+def _describe_fields(field_names: List[str]) -> str:
+    """Render field names as a manager-readable bulleted list."""
+    return "\n".join(
+        f"- {FIELD_LABELS.get(name, name.replace('_', ' ').capitalize())}"
+        for name in field_names
+    )
+
+
 def profile_generation_node(state: Stage1State) -> Dict[str, Any]:
-    """Generate the Role Intelligence Profile from all collected answers."""
+    """Generate the Role Intelligence Profile from all collected answers.
+
+    On validation failure this records the offending field names in state rather
+    than raising. The graph then routes to profile_clarification, which asks the
+    manager to supply them — CLAUDE.md requires surfacing the specific validation
+    errors and asking, and explicitly forbids silently filling defaults.
+    """
     session_id = state.get("session_id", "")
-    logger.info("session=%s stage=1 node=profile_generation", session_id)
+    attempts = state.get("profile_generation_attempts", 0) + 1
+    logger.info(
+        "session=%s stage=1 node=profile_generation attempt=%d", session_id, attempts
+    )
 
     llm = _get_primary_llm()
 
@@ -317,11 +360,47 @@ def profile_generation_node(state: Stage1State) -> Dict[str, Any]:
         try:
             profile = structured_llm.invoke(messages)
         except Exception as second_error:
-            logger.error("session=%s Profile generation failed on retry: %s", session_id, second_error)
-            raise
+            failed_fields = _extract_failed_fields(second_error)
+            logger.error(
+                "session=%s stage=1 profile generation failed on retry "
+                "(attempt=%d) fields=%s: %s",
+                session_id, attempts, failed_fields, second_error,
+            )
+            return {
+                "profile_generation_errors": failed_fields or ["unknown"],
+                "profile_generation_attempts": attempts,
+            }
 
     return {
         "role_intelligence_profile": profile,
+        "profile_generation_errors": [],
+        "profile_generation_attempts": attempts,
+    }
+
+
+def profile_clarification_node(state: Stage1State) -> Dict[str, Any]:
+    """Ask the manager to supply the details that failed profile validation."""
+    session_id = state.get("session_id", "")
+    failed_fields = state.get("profile_generation_errors", [])
+    attempts = state.get("profile_generation_attempts", 0)
+
+    logger.info(
+        "session=%s stage=1 node=profile_clarification attempt=%d fields=%s",
+        session_id, attempts, failed_fields,
+    )
+
+    if attempts >= MAX_PROFILE_GENERATION_ATTEMPTS:
+        message = PROFILE_GENERATION_GIVE_UP_MESSAGE.format(
+            fields=_describe_fields(failed_fields)
+        )
+    else:
+        message = PROFILE_CLARIFICATION_MESSAGE_TEMPLATE.format(
+            fields=_describe_fields(failed_fields)
+        )
+
+    return {
+        "conversation_history": [AIMessage(content=message)],
+        "last_agent_message": message,
     }
 
 
@@ -457,8 +536,22 @@ def finalise_node(state: Stage1State) -> Dict[str, Any]:
 
 
 def session_close_node(state: Stage1State) -> Dict[str, Any]:
-    """Output the closing message and mark session complete."""
+    """Output the closing message and mark session complete.
+
+    The standard close promises a Stage 2 link for the employee. That promise is
+    only true when a profile was actually confirmed — reaching here without one
+    means profile generation was abandoned, and the clarification node has
+    already explained that. Do not overwrite it with a cheerful close.
+    """
     session_id = state.get("session_id", "")
+
+    if not state.get("profile_confirmed"):
+        logger.warning(
+            "session=%s stage=1 node=session_close closing WITHOUT a confirmed profile",
+            session_id,
+        )
+        return {"session_complete": True}
+
     logger.info("session=%s stage=1 node=session_close", session_id)
 
     return {
@@ -485,6 +578,26 @@ def route_after_advance(state: Stage1State) -> str:
     if state.get("current_block") == "__complete__":
         return "profile_generation"
     return "ask_question"
+
+
+def route_after_profile_generation(state: Stage1State) -> str:
+    """Route to review on success, or to clarification when validation failed."""
+    if state.get("profile_generation_errors"):
+        return "profile_clarification"
+    return "profile_review"
+
+
+def route_after_clarification(state: Stage1State) -> str:
+    """Retry generation with the manager's extra detail, or stop trying.
+
+    After MAX_PROFILE_GENERATION_ATTEMPTS the loop ends rather than asking the
+    manager the same thing forever. The session closes without a confirmed
+    profile, which is a visible, explainable outcome — unlike the previous
+    behaviour of raising an unhandled 500 mid-conversation.
+    """
+    if state.get("profile_generation_attempts", 0) >= MAX_PROFILE_GENERATION_ATTEMPTS:
+        return "session_close"
+    return "profile_generation"
 
 
 def _normalise_reply(text: str) -> str:

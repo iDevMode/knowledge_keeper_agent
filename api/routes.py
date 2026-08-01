@@ -242,6 +242,8 @@ def create_stage1():
         "followup_count": 0,
         "pending_followup": None,
         "last_agent_message": "",
+        "profile_generation_errors": [],
+        "profile_generation_attempts": 0,
     }
 
     state = _run_graph_initial(instance, initial_state)
