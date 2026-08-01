@@ -89,9 +89,17 @@ def build_stage1_graph(checkpointer=None):
     if checkpointer is None:
         checkpointer = MemorySaver()
 
+    # Two human-in-the-loop pause points:
+    #   process_answer  — wait for the manager's answer to the current question
+    #   profile_review  — wait for the manager to confirm or correct the generated
+    #                     profile. Without this the review message is emitted and
+    #                     immediately re-evaluated against the manager's *previous*
+    #                     interview answer, which routes straight back into
+    #                     corrections and loops until the process dies.
     return builder.compile(
         checkpointer=checkpointer,
         interrupt_before=["process_answer"],
+        interrupt_after=["profile_review"],
     )
 
 
