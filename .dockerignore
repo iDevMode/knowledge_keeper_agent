@@ -8,3 +8,10 @@ __pycache__
 .pytest_cache
 .venv
 venv
+
+# Developer tooling — never needed at runtime
+.claude
+.agents
+.agent
+skills-lock.json
+CLAUDE.md
