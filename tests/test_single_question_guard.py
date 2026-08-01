@@ -6,7 +6,7 @@ re-checking, so a model that ignored the re-prompt still shipped multiple
 questions and the enforcement was effectively advisory.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
