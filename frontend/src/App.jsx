@@ -9,7 +9,9 @@ export default function App() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/stage1/:sessionId" element={<Stage1Page />} />
-      <Route path="/stage2/:stage1SessionId" element={<Stage2Page />} />
+      {/* The employee's own session id — it used to be the manager's, which
+          made the shared link a credential for the manager's interview. */}
+      <Route path="/stage2/:sessionId" element={<Stage2Page />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
   )

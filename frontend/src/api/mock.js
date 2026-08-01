@@ -162,18 +162,26 @@ function createSession(stage, stage1Id) {
 
 // ── Exported mock API functions ──────────────────────────────────────────────
 
+// Demo mode short-circuits before the auth layer, so these tokens are inert
+// placeholders — they exist only so the demo exercises the same shapes the real
+// API returns.
 export async function createStage1Session() {
   await delay(600)
   const sessionId = createSession(1)
   const greeting = `Welcome to KnowledgeKeeper. I'm here to help you set up a knowledge capture session for a departing employee.\n\nThis will take around 10–15 minutes. I'll ask you a series of questions about the role, the business context, and your priorities. At the end, I'll generate a Role Intelligence Profile that will guide the employee interview.\n\nLet's get started.`
-  return { session_id: sessionId, message: greeting }
+  return { session_id: sessionId, message: greeting, token: `mock-manager-${sessionId}` }
 }
 
 export async function createStage2Session(stage1SessionId) {
   await delay(800)
   const sessionId = createSession(2, stage1SessionId)
   const greeting = `Hi there. Thanks for agreeing to take part in this knowledge capture session — I really appreciate your time.\n\nThis conversation is designed to help capture the important knowledge you carry in your role, so that your team and your successor have the best possible foundation going forward. There are no right or wrong answers — I'm just here to listen and ask the right questions.\n\nEverything you share will be used to create a handover document. You'll have the opportunity to flag anything as confidential.\n\nShall we begin?`
-  return { session_id: sessionId, message: greeting }
+  sessions[sessionId].greeting = greeting
+  return {
+    session_id: sessionId,
+    message: greeting,
+    employee_token: `mock-employee-${sessionId}`,
+  }
 }
 
 export async function sendMessage(sessionId, message) {
@@ -201,14 +209,19 @@ export async function sendMessage(sessionId, message) {
       }
     }
 
+    // Mirrors the real backend: Stage 3 starts automatically here rather than
+    // waiting for the employee to press a button.
+    session.documentId = 'mock-doc-' + Math.random().toString(36).slice(2, 8)
+
     return {
-      message: `Thank you so much for your time and openness today. The knowledge you've shared is incredibly valuable and will make a real difference for your team and successor.\n\nYour handover document is ready to be generated. You can choose your preferred format below.`,
+      message: `Thank you so much for your time and openness today. The knowledge you've shared is incredibly valuable and will make a real difference for your team and successor.\n\nYour handover pack is being prepared and sent to your manager.`,
       session_complete: true,
       profile: null,
     }
   }
 
   session.questionIndex++
+  session.lastMessage = questions[idx]
 
   return {
     message: questions[idx],
@@ -230,6 +243,8 @@ export async function getSessionStatus(sessionId) {
     current_block: getBlock(session.questionIndex),
     current_question_index: session.questionIndex,
     risk_flag_count: session.riskFlagCount,
+    last_agent_message: session.lastMessage || session.greeting || null,
+    document_id: session.documentId || null,
   }
 }
 
@@ -363,21 +378,25 @@ The Senior Operations Manager role sits within a team of 8 in the Operations dep
 // Store generated blob URLs for cleanup
 const _blobUrls = {}
 
+function _materialise(docId) {
+  if (!_blobUrls[docId]) {
+    const blob = new Blob([MOCK_DOCUMENT_MARKDOWN], { type: 'text/markdown;charset=utf-8' })
+    _blobUrls[docId] = URL.createObjectURL(blob)
+  }
+  return _blobUrls[docId]
+}
+
 export async function generateDocument(sessionId, format) {
   await delay(3000)
   const docId = 'mock-doc-' + Math.random().toString(36).slice(2, 8)
+  return { document_id: docId, download_url: _materialise(docId) }
+}
 
-  // Create a downloadable blob
-  const blob = new Blob([MOCK_DOCUMENT_MARKDOWN], { type: 'text/markdown;charset=utf-8' })
-  const blobUrl = URL.createObjectURL(blob)
-  _blobUrls[docId] = blobUrl
-
-  return {
-    document_id: docId,
-    download_url: blobUrl,
-  }
+export async function awaitDocument(documentId) {
+  await delay(2000)
+  return { document_id: documentId, download_url: _materialise(documentId) }
 }
 
 export function getDownloadUrl(documentId) {
-  return _blobUrls[documentId] || '#'
+  return _materialise(documentId)
 }
