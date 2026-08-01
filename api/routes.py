@@ -212,8 +212,45 @@ _last_sweep_at = 0.0
 _sweep_lock = threading.Lock()
 
 
+def safe_static_path(base: Path, relative: str) -> Optional[Path]:
+    """Resolve `relative` under `base`, returning None if it escapes or is absent.
+
+    Kept as a module-level function rather than inlined in the SPA handler so the
+    containment guard can be tested without a built frontend. frontend/dist is a
+    gitignored build artefact, so a test that needs the route mounted skips in CI
+    and on any fresh clone — exactly where the guard matters most.
+    """
+    if not relative:
+        return None
+
+    root = base.resolve()
+    candidate = (root / relative).resolve()
+
+    if not candidate.is_file():
+        return None
+    if not candidate.is_relative_to(root):
+        return None
+    return candidate
+
+
 def _document_dir() -> Path:
-    _DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
+    """Return the managed document directory, restricted to the running user.
+
+    The directory this replaced was created by tempfile.mkdtemp, which is
+    documented as readable/writable/searchable only by the creating user (0o700).
+    Path.mkdir defaults to 0o777 & ~umask — typically 0o755 on Linux — so
+    switching to a shared managed directory would have widened access to
+    generated handover documents, which contain sensitive HR content.
+
+    chmod is applied on every call because mkdir's mode argument is ignored when
+    the directory already exists. It is best-effort: Windows does not honour
+    POSIX modes, and a directory owned by another user cannot be chmod'ed.
+    """
+    _DOCUMENT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(_DOCUMENT_DIR, 0o700)
+    except OSError as e:
+        logger.warning("could not restrict permissions on %s: %s", _DOCUMENT_DIR, e)
     return _DOCUMENT_DIR
 
 
@@ -580,8 +617,6 @@ def download_document(document_id: str):
 if _FRONTEND_DIST.exists():
     _index_html = (_FRONTEND_DIST / "index.html").read_text()
 
-    _FRONTEND_DIST_RESOLVED = _FRONTEND_DIST.resolve()
-
     @app.get("/{full_path:path}")
     def serve_spa(full_path: str):
         # Only ever serve files that resolve INSIDE the dist directory. Starlette
@@ -589,9 +624,8 @@ if _FRONTEND_DIST.exists():
         # — but the containment check must live here, not depend on an upstream
         # layer we do not control (a proxy forwarding raw dot segments, a
         # different ASGI server, or a direct call would all bypass it).
-        if full_path:
-            candidate = (_FRONTEND_DIST_RESOLVED / full_path).resolve()
-            if candidate.is_file() and candidate.is_relative_to(_FRONTEND_DIST_RESOLVED):
-                return FileResponse(str(candidate))
+        candidate = safe_static_path(_FRONTEND_DIST, full_path)
+        if candidate is not None:
+            return FileResponse(str(candidate))
         # Otherwise serve index.html for client-side routing
         return HTMLResponse(_index_html)
