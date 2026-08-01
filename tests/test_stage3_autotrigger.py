@@ -214,6 +214,61 @@ class TestAutoGenerationNeverBreaksTheInterview:
         assert body["message"], "the employee got no closing message"
 
 
+class TestFailureIsVisibleToTheManager:
+    """A silent failure is worse than a loud one.
+
+    Auto-generation swallowed its error into a log line, so the manager watched
+    "preparing the handover pack..." forever with no way to know it had failed.
+    """
+
+    def _complete_with_missing_profile(self, client, tmp_path):
+        from api.session_manager import get_session_store
+
+        with patch("agents.stage2_employee_interview.nodes._get_primary_llm", side_effect=_primary), \
+             patch("agents.stage2_employee_interview.nodes._get_classifier_llm", side_effect=_classifier):
+            engagement = _Engagement(client, tmp_path).start_stage2()
+            # The Stage 1 session and its profile expire mid-interview — the
+            # real failure when an employee takes longer than the session TTL.
+            get_session_store()._profiles.pop(engagement.stage1_id, None)
+            engagement.answer_until_complete()
+        return engagement
+
+    def test_status_reports_why_no_document_exists(self, client, tmp_path):
+        engagement = self._complete_with_missing_profile(client, tmp_path)
+
+        response = client.get(
+            f"/api/sessions/{engagement.stage2_id}/status",
+            headers=_bearer(engagement.manager_token),
+        )
+        body = response.json()
+        assert body["document_id"] is None
+        assert body["generation_error"], "the manager was told nothing"
+        assert "profile" in body["generation_error"].lower()
+
+    def test_the_employee_is_not_shown_the_failure(self, client, tmp_path):
+        engagement = self._complete_with_missing_profile(client, tmp_path)
+
+        response = client.get(
+            f"/api/sessions/{engagement.stage2_id}/status",
+            headers=_bearer(engagement.employee_token),
+        )
+        assert response.json()["generation_error"] is None
+
+    def test_a_successful_regeneration_clears_the_error(self, client, tmp_path, engagement):
+        import api.routes as routes_mod
+
+        routes_mod._session_generation_error[engagement.stage2_id] = "an earlier failure"
+        engagement.answer_until_complete()
+        _await_job(routes_mod)
+
+        response = client.get(
+            f"/api/sessions/{engagement.stage2_id}/status",
+            headers=_bearer(engagement.manager_token),
+        )
+        assert response.json()["generation_error"] is None
+        assert response.json()["document_id"]
+
+
 class TestManagerCanStillRegenerate:
     def test_manager_regeneration_produces_a_second_document(self, client, engagement):
         import api.routes as routes_mod

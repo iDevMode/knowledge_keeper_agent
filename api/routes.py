@@ -77,6 +77,9 @@ class SessionStatusResponse(BaseModel):
     linked_session_id: Optional[str] = None
     risk_flag_count: Optional[int] = None
     document_id: Optional[str] = None
+    # Why no document exists, for the manager only. Otherwise a Stage 3 failure
+    # leaves them watching "preparing the handover pack..." indefinitely.
+    generation_error: Optional[str] = None
     # The employee's session is now created by the manager, so the employee
     # never sees the creation response that carried the opening question. They
     # pick it up here when they open their link, which also restores the last
@@ -232,6 +235,10 @@ _generation_jobs: Dict[str, Dict[str, Any]] = {}  # document_id -> {status, down
 _document_created_at: Dict[str, float] = {}  # document_id -> unix timestamp
 _document_owner: Dict[str, str] = {}  # document_id -> owning stage 2 session_id
 _session_document: Dict[str, str] = {}  # stage 2 session_id -> document_id
+# Why the automatic Stage 3 run never started, surfaced to the manager. Without
+# this the manager watches an empty progress line forever and the only record is
+# a log entry nobody reads.
+_session_generation_error: Dict[str, str] = {}
 
 # One managed directory for generated documents, instead of a fresh mkdtemp per
 # generation that was never cleaned up.
@@ -251,6 +258,21 @@ _sweep_lock = threading.Lock()
 
 
 # ---- Authorisation ----
+
+def _employee_token_ttl() -> float:
+    """Employee link lifetime, capped at the life of the session behind it.
+
+    STAGE1_TO_STAGE2_LINK_TTL_HOURS defaults to 168 while SESSION_TTL_HOURS
+    defaults to 72, so an uncapped token stayed cryptographically valid for four
+    days after the session store had already dropped the session. The employee
+    followed a link they were told was good for a week and got "Session not
+    found" on day four. A token must never outlive the data it points at.
+    """
+    return min(
+        settings.stage1_to_stage2_link_ttl_hours,
+        settings.session_ttl_hours,
+    ) * 3600
+
 
 def _claims_or_401(token: str) -> TokenClaims:
     try:
@@ -414,6 +436,7 @@ def sweep_resources(force: bool = False) -> Dict[str, int]:
         owner = _document_owner.pop(doc_id, None)
         if owner is not None and _session_document.get(owner) == doc_id:
             _session_document.pop(owner, None)
+            _session_generation_error.pop(owner, None)
         if file_path:
             try:
                 os.remove(file_path)
@@ -492,6 +515,7 @@ def _start_generation(session_id: str, output_format: str) -> str:
     _document_created_at[document_id] = time.time()
     _document_owner[document_id] = session_id
     _session_document[session_id] = document_id
+    _session_generation_error.pop(session_id, None)
 
     thread = threading.Thread(
         target=_run_generation_in_background,
@@ -626,6 +650,28 @@ def create_stage2(
     if not stage1_session:
         raise HTTPException(status_code=404, detail="Stage 1 session not found")
 
+    # Idempotent: one Stage 1 has exactly one employee interview. Creating a
+    # second would overwrite the store link and orphan the first — the employee
+    # could keep using a link the manager could no longer reach, and its
+    # document would be unreachable too.
+    existing = store.get_linked_session(request.stage1_session_id)
+    if existing and store.get_session(existing):
+        instance = _registry.get(existing)
+        greeting = ""
+        if instance:
+            greeting = instance.graph.get_state(instance.config).values.get(
+                "last_agent_message", ""
+            )
+        logger.info(
+            "session=%s stage=2 action=reissued linked_to=%s",
+            existing, request.stage1_session_id,
+        )
+        return Stage2CreatedResponse(
+            session_id=existing,
+            message=greeting,
+            employee_token=issue_token(existing, EMPLOYEE, ttl_seconds=_employee_token_ttl()),
+        )
+
     # Validate profile exists
     profile = store.get_profile(request.stage1_session_id)
     if not profile:
@@ -662,9 +708,7 @@ def create_stage2(
     return Stage2CreatedResponse(
         session_id=session_id,
         message=greeting,
-        employee_token=issue_token(
-            session_id, EMPLOYEE, ttl_seconds=settings.stage1_to_stage2_link_ttl_hours * 3600
-        ),
+        employee_token=issue_token(session_id, EMPLOYEE, ttl_seconds=_employee_token_ttl()),
     )
 
 
@@ -727,10 +771,13 @@ def send_message(session_id: str, request: SendMessageRequest):
         # to the employee. The manager picks it up from session status.
         try:
             _start_generation(session_id, settings.default_output_format)
+            _session_generation_error.pop(session_id, None)
         except GenerationNotReady as e:
             logger.error("session=%s auto-generation skipped: %s", session_id, e)
+            _session_generation_error[session_id] = str(e)
         except Exception as e:
             logger.error("session=%s auto-generation failed to start: %s", session_id, e)
+            _session_generation_error[session_id] = "Document generation could not be started"
         on_stage2_complete(session_id)
 
     return response
@@ -756,9 +803,11 @@ def get_session_status(
         linked_session_id=store.get_linked_session(session_id),
     )
 
-    # Only the manager is told a document exists — it is theirs to collect.
+    # Only the manager is told a document exists — it is theirs to collect —
+    # or why one does not.
     if claims.is_manager:
         response.document_id = _session_document.get(session_id)
+        response.generation_error = _session_generation_error.get(session_id)
 
     if instance:
         snapshot = instance.graph.get_state(instance.config)

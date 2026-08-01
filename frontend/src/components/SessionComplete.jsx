@@ -75,6 +75,13 @@ function Stage1Complete({ sessionId, profile }) {
 
         if (status.session_complete) setEmployeeComplete(true)
 
+        if (status.generation_error) {
+          setDocumentError(
+            `The handover pack could not be generated: ${status.generation_error}`
+          )
+          return
+        }
+
         if (status.document_id) {
           const doc = await awaitDocument(status.document_id, sessionId)
           if (cancelled) return

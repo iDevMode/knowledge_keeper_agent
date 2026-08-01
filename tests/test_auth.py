@@ -335,6 +335,102 @@ class TestTokensAreBoundToOneSession:
         assert response.status_code == 401
 
 
+class TestStage2CreationIsIdempotent:
+    """One Stage 1 has exactly one employee interview.
+
+    Creating a second overwrote the store link and orphaned the first: the
+    employee could keep using a link the manager could no longer reach, and the
+    document produced from it became unreachable too.
+    """
+
+    def test_second_call_returns_the_same_session(self, client, engagement):
+        response = client.post(
+            "/api/sessions/stage2",
+            json={"stage1_session_id": engagement["stage1_id"]},
+            headers=_bearer(engagement["manager_token"]),
+        )
+        assert response.status_code == 200
+        assert response.json()["session_id"] == engagement["stage2_id"]
+
+    def test_the_manager_can_still_reach_it_afterwards(self, client, engagement):
+        client.post(
+            "/api/sessions/stage2",
+            json={"stage1_session_id": engagement["stage1_id"]},
+            headers=_bearer(engagement["manager_token"]),
+        )
+        response = client.get(
+            f"/api/sessions/{engagement['stage2_id']}/status",
+            headers=_bearer(engagement["manager_token"]),
+        )
+        assert response.status_code == 200, "the first employee session was orphaned"
+
+    def test_the_reissued_token_works(self, client, engagement):
+        reissued = client.post(
+            "/api/sessions/stage2",
+            json={"stage1_session_id": engagement["stage1_id"]},
+            headers=_bearer(engagement["manager_token"]),
+        ).json()["employee_token"]
+
+        response = client.get(
+            f"/api/sessions/{engagement['stage2_id']}/status",
+            headers=_bearer(reissued),
+        )
+        assert response.status_code == 200
+
+
+class TestTokenNeverOutlivesItsSession:
+    """The link cannot promise longer than the session behind it lasts.
+
+    With the old defaults (link 168h, session 72h) an employee was told they
+    had a week and got "Session not found" on day four.
+    """
+
+    def test_employee_token_ttl_is_capped_at_the_session_ttl(self):
+        from api.routes import _employee_token_ttl
+        from config.settings import settings
+
+        assert _employee_token_ttl() <= settings.session_ttl_hours * 3600
+
+    def test_cap_applies_even_if_the_link_ttl_is_configured_longer(self):
+        from api.routes import _employee_token_ttl
+        from config.settings import settings
+
+        original = settings.stage1_to_stage2_link_ttl_hours
+        object.__setattr__(settings, "stage1_to_stage2_link_ttl_hours", 999)
+        try:
+            assert _employee_token_ttl() == settings.session_ttl_hours * 3600
+        finally:
+            object.__setattr__(settings, "stage1_to_stage2_link_ttl_hours", original)
+
+    def test_shipped_defaults_are_coherent(self):
+        from config.settings import Settings
+
+        # _env_file=None so this checks the values in settings.py rather than
+        # whatever the local .env happens to say.
+        defaults = Settings(
+            _env_file=None, anthropic_api_key="x", api_secret_key="x",
+            environment="development",
+        )
+        assert (
+            defaults.stage1_to_stage2_link_ttl_hours <= defaults.session_ttl_hours
+        ), "the default employee link outlives the default session"
+
+    def test_startup_refuses_an_incoherent_pair(self, capsys):
+        from config.settings import Settings
+
+        bad = Settings(
+            anthropic_api_key="x",
+            api_secret_key="x",
+            environment="production",
+            allowed_origins="https://example.com",
+            session_ttl_hours=72,
+            stage1_to_stage2_link_ttl_hours=168,
+        )
+        with pytest.raises(SystemExit):
+            bad.validate_for_production()
+        assert "SESSION_TTL_HOURS" in capsys.readouterr().err
+
+
 # ---- CORS origin parsing ----
 
 class TestAllowedOriginParsing:
