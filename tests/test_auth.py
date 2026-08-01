@@ -1,9 +1,9 @@
-"""Stage-scoped session tokens (review finding H5).
+﻿"""Stage-scoped session tokens (review finding H5).
 
 Access control previously rested on possession of a session UUID. Because the
 Stage 2 link is designed to be forwarded to the departing employee, that handed
-the employee the manager's session id — enough to read and write the manager's
-interview — and let them generate and download their own handover pack, Risk
+the employee the manager's session id â€” enough to read and write the manager's
+interview â€” and let them generate and download their own handover pack, Risk
 Summary included.
 
 These tests use a bare TestClient and set Authorization explicitly. The
@@ -53,6 +53,7 @@ def reset_singletons():
     routes_mod._document_store.clear()
     routes_mod._document_owner.clear()
     routes_mod._session_document.clear()
+    routes_mod._session_generation_error.clear()
     routes_mod._generation_jobs.clear()
     yield
 
@@ -363,6 +364,28 @@ class TestStage2CreationIsIdempotent:
             headers=_bearer(engagement["manager_token"]),
         )
         assert response.status_code == 200, "the first employee session was orphaned"
+
+    def test_a_session_with_no_graph_is_replaced_rather_than_reissued(
+        self, client, engagement
+    ):
+        """Reissuing a token for a session with no graph hands out a dead link."""
+        import api.routes as routes_mod
+
+        routes_mod._registry.remove(engagement["stage2_id"])
+
+        with patch("agents.stage2_employee_interview.nodes._get_primary_llm",
+                   side_effect=_primary), \
+             patch("agents.stage2_employee_interview.nodes._get_classifier_llm",
+                   side_effect=_classifier):
+            response = client.post(
+                "/api/sessions/stage2",
+                json={"stage1_session_id": engagement["stage1_id"]},
+                headers=_bearer(engagement["manager_token"]),
+            )
+
+        assert response.status_code == 200
+        assert response.json()["session_id"] != engagement["stage2_id"]
+        assert response.json()["message"], "the employee would see a blank chat"
 
     def test_the_reissued_token_works(self, client, engagement):
         reissued = client.post(

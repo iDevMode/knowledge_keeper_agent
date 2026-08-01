@@ -53,6 +53,7 @@ def reset_singletons():
     routes_mod._document_store.clear()
     routes_mod._document_owner.clear()
     routes_mod._session_document.clear()
+    routes_mod._session_generation_error.clear()
     routes_mod._generation_jobs.clear()
     routes_mod._document_created_at.clear()
 

@@ -654,14 +654,18 @@ def create_stage2(
     # second would overwrite the store link and orphan the first — the employee
     # could keep using a link the manager could no longer reach, and its
     # document would be unreachable too.
+    #
+    # The graph instance must exist too, not just the store record. Without a
+    # graph there is nothing to resume: the employee would open the link to a
+    # blank chat and every message would 404. Falling through to create a fresh
+    # session is better recovery than reissuing a token for a dead one.
     existing = store.get_linked_session(request.stage1_session_id)
-    if existing and store.get_session(existing):
-        instance = _registry.get(existing)
-        greeting = ""
-        if instance:
-            greeting = instance.graph.get_state(instance.config).values.get(
-                "last_agent_message", ""
-            )
+    existing_instance = _registry.get(existing) if existing else None
+    if existing and existing_instance and store.get_session(existing):
+        instance = existing_instance
+        greeting = instance.graph.get_state(instance.config).values.get(
+            "last_agent_message", ""
+        )
         logger.info(
             "session=%s stage=2 action=reissued linked_to=%s",
             existing, request.stage1_session_id,

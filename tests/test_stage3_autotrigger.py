@@ -1,7 +1,7 @@
-"""Stage 3 fires automatically on Stage 2 completion (review finding M6).
+﻿"""Stage 3 fires automatically on Stage 2 completion (review finding M6).
 
 CLAUDE.md: "Stage 3 is triggered automatically on Stage 2 completion." In code
-it was client-driven — api/webhooks.py only logged — so an employee who closed
+it was client-driven â€” api/webhooks.py only logged â€” so an employee who closed
 the tab on the final question left no document behind, and nobody found out
 until the manager went looking for it.
 """
@@ -30,6 +30,7 @@ def reset_singletons():
     routes_mod._document_store.clear()
     routes_mod._document_owner.clear()
     routes_mod._session_document.clear()
+    routes_mod._session_generation_error.clear()
     routes_mod._generation_jobs.clear()
     routes_mod._document_created_at.clear()
     yield
@@ -141,7 +142,7 @@ def engagement(client, tmp_path):
 
 class TestGenerationStartsWithoutTheClient:
     def test_a_document_is_produced_with_no_generate_call(self, client, engagement):
-        """The employee closes the tab at completion — the pack still exists."""
+        """The employee closes the tab at completion â€” the pack still exists."""
         import api.routes as routes_mod
 
         engagement.answer_until_complete()
@@ -227,7 +228,7 @@ class TestFailureIsVisibleToTheManager:
         with patch("agents.stage2_employee_interview.nodes._get_primary_llm", side_effect=_primary), \
              patch("agents.stage2_employee_interview.nodes._get_classifier_llm", side_effect=_classifier):
             engagement = _Engagement(client, tmp_path).start_stage2()
-            # The Stage 1 session and its profile expire mid-interview — the
+            # The Stage 1 session and its profile expire mid-interview â€” the
             # real failure when an employee takes longer than the session TTL.
             get_session_store()._profiles.pop(engagement.stage1_id, None)
             engagement.answer_until_complete()
