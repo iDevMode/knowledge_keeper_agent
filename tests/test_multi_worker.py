@@ -292,15 +292,26 @@ class TestAnyWorkerCanServeAnySession:
         make it meaningless, and failed against a clean one because it ran
         before the pools were opened.
         """
-        # Re-read the log rather than using the pids captured at startup: the
-        # supervisor respawns a worker that dies, so the log accumulates more
-        # "Started server process" lines than there are live workers, and an
-        # older pid in that list is legitimately gone.
-        logged = {int(p) for p in _STARTED.findall(running_server.log_contents())}
+        # Re-read the log each time rather than using the pids captured at
+        # startup: the supervisor respawns a worker that dies, so the log
+        # accumulates more "Started server process" lines than there are live
+        # workers, and an older pid in that list is legitimately gone.
+        #
+        # Polled rather than sampled once, because the claim is that the server
+        # MAINTAINS this many workers. A single sample can land in the gap
+        # between a worker dying and the supervisor replacing it, which showed
+        # up as a rare failure under full-suite load.
+        deadline = time.time() + 10
+        while True:
+            logged = {int(p) for p in _STARTED.findall(running_server.log_contents())}
+            alive = sorted(pid for pid in logged if _process_alive(pid))
+            if len(alive) >= WORKERS or time.time() > deadline:
+                break
+            time.sleep(0.2)
+
         assert running_server.proc.pid not in logged, (
             "counted the supervisor as a worker"
         )
-        alive = sorted(pid for pid in logged if _process_alive(pid))
         assert len(alive) >= WORKERS, (
             f"expected {WORKERS} live worker processes, found {alive} among "
             f"logged {sorted(logged)}:\n{running_server.log_contents()}"
