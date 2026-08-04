@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+import anthropic
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
@@ -29,6 +30,7 @@ from api.auth import (
     issue_token,
     verify_token,
 )
+from api import llm_errors
 from api.document_store import get_document_store
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
@@ -343,6 +345,34 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Registered as a handler rather than a try/except around one endpoint:
+    # every path that reaches the LLM — sending a message, generating a
+    # profile, creating a Stage 2 session — can raise these, and a handler
+    # cannot be forgotten when the next one is added.
+    @app.exception_handler(anthropic.APIError)
+    def _handle_anthropic_error(request: Request, exc: anthropic.APIError):
+        failure = llm_errors.classify(exc)
+        if failure is None:  # pragma: no cover — classify covers APIError
+            raise exc
+        llm_errors.log_failure(exc, failure, path=request.url.path)
+
+        headers = {}
+        if failure.retryable:
+            # Honour Anthropic's own backoff when it gave us one, so a client
+            # that retries does not immediately hit the same limit.
+            retry_after = getattr(getattr(exc, "response", None), "headers", {})
+            retry_after = retry_after.get("retry-after") if retry_after else None
+            headers["Retry-After"] = str(retry_after or 5)
+
+        # Shaped like FastAPI's own HTTPException body so the frontend's single
+        # `body.detail` read works for these too.
+        return JSONResponse(
+            status_code=failure.status_code,
+            content={"detail": failure.detail},
+            headers=headers,
+        )
+
     return app
 
 
@@ -684,6 +714,18 @@ def _run_generation_in_background(
         )
 
     except Exception as e:
+        # This runs in a worker thread, so the app's exception handler never
+        # sees it — the mapping has to be applied here too. Without it the
+        # manager's progress line showed the raw SDK repr, which is the same
+        # opaque failure the handler exists to remove, just in a different place.
+        failure = llm_errors.classify(e)
+        if failure is not None:
+            llm_errors.log_failure(
+                e, failure, session=session_id, document=document_id
+            )
+            get_document_store().fail_job(document_id, failure.detail)
+            return
+
         logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
         get_document_store().fail_job(document_id, str(e))
 
