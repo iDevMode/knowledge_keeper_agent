@@ -13,6 +13,11 @@ export default function ChatWindow({
   riskFlagCount,
   sessionComplete,
   title,
+  // Rendered by ChatWindow itself rather than passed through `children`.
+  // `children` only mounts once the session is complete, so an error raised
+  // mid-interview was never displayed: the send cleared the box, the user
+  // message was rolled back, and the failure was completely silent.
+  error,
   children,
 }) {
   const messagesEndRef = useRef(null)
@@ -57,6 +62,17 @@ export default function ChatWindow({
         )}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Errors show in both states — a failed send must never be silent. */}
+      {error && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="px-6 py-3 border-t border-red-200 bg-red-50 text-red-700 text-sm"
+        >
+          {error}
+        </div>
+      )}
 
       {/* Session complete content or input */}
       {sessionComplete ? (
