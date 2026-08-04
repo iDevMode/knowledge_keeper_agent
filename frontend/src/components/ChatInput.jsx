@@ -17,14 +17,23 @@ export default function ChatInput({ onSend, disabled }) {
     }
   }
 
-  function submit() {
+  async function submit() {
     const trimmed = value.trim()
     if (!trimmed || disabled) return
-    onSend(trimmed)
+
+    // Clear optimistically so the box empties the moment you hit Enter...
     setValue('')
-    // Reset textarea height
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
+    }
+
+    // ...but put the text back if it never reached the agent. Previously the
+    // box was cleared unconditionally, so a failed send destroyed what you had
+    // written and looked like nothing had happened at all.
+    const delivered = await onSend(trimmed)
+    if (delivered === false) {
+      setValue(trimmed)
+      requestAnimationFrame(() => textareaRef.current?.focus())
     }
   }
 

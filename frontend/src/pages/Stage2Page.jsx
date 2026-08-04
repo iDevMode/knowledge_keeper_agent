@@ -106,14 +106,10 @@ export default function Stage2Page() {
       currentBlock={currentBlock}
       riskFlagCount={riskFlagCount}
       sessionComplete={sessionComplete}
+      error={error}
       title="Stage 2 — Employee Interview"
     >
       {sessionComplete && <SessionComplete stage={2} sessionId={sessionId} />}
-      {error && (
-        <div className="px-6 py-3 bg-red-50 text-red-700 text-sm">
-          {error}
-        </div>
-      )}
     </ChatWindow>
   )
 }

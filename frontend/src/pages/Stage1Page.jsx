@@ -40,6 +40,7 @@ export default function Stage1Page() {
       stage={1}
       currentBlock={currentBlock}
       sessionComplete={sessionComplete}
+      error={error}
       title="Stage 1 — Interview Setup"
     >
       {sessionComplete && (
@@ -48,11 +49,6 @@ export default function Stage1Page() {
           sessionId={sessionId}
           profile={profile}
         />
-      )}
-      {error && (
-        <div className="px-6 py-3 bg-red-50 text-red-700 text-sm">
-          {error}
-        </div>
       )}
     </ChatWindow>
   )

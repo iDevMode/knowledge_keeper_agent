@@ -14,9 +14,21 @@ export default function useChat(sessionId) {
     setMessages((prev) => [...prev, { role: 'agent', content }])
   }, [])
 
+  /**
+   * Returns true if the message reached the agent, false if it did not.
+   * ChatInput uses that to put the text back in the box rather than lose it:
+   * on failure the user message is removed from the transcript, so without
+   * this the words are gone from both places and the send looks like a no-op.
+   */
   const sendMessage = useCallback(
     async (text) => {
-      if (!sessionId || loading || sessionComplete) return
+      if (!sessionId) {
+        // Was a silent return. Nothing is more confusing than a send that
+        // clears the box and does nothing at all.
+        setError('This session is not loaded properly. Try reopening your link.')
+        return false
+      }
+      if (loading || sessionComplete) return false
 
       setMessages((prev) => [...prev, { role: 'user', content: text }])
       setLoading(true)
@@ -43,10 +55,14 @@ export default function useChat(sessionId) {
         } catch {
           // Non-critical — don't block chat for status failures
         }
+        return true
       } catch (err) {
-        setError(err.message)
-        // Remove the user message on error so they can retry
+        setError(err.message || 'Something went wrong sending that message.')
+        // Drop the user message again: the agent never received it, so leaving
+        // it in the transcript would show a turn that did not happen. The text
+        // itself is not lost — returning false puts it back in the input.
         setMessages((prev) => prev.slice(0, -1))
+        return false
       } finally {
         setLoading(false)
       }
