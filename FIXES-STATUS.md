@@ -2,12 +2,15 @@
 
 **Working file for the review-fix branch. Delete when the branch merges — the git history is the permanent record.**
 
-Branch: `fix/review-findings` (off `chore/repo-hygiene-and-debug-cleanup`, itself off `main`)
-Tests: **271 passing** (was 121 before this work; 150 added). Fresh clone without
-`.env` or `frontend/dist`: 267 passed, 4 skipped (the skips are mounted-route SPA
-tests that genuinely require a built frontend).
-Working tree: clean, nothing pushed
-Last updated: 2026-08-01
+Branch: `feat/h3-durable-persistence` (off `main`, after PRs #2 and #3 merged)
+Tests: **442 passing** with a Postgres test database (was 121 before this work).
+Without one: 374 passed, 68 skipped — all 68 are the Postgres-backed halves of the
+store contract, restart-persistence and multi-worker suites, and every one names
+`TEST_DATABASE_URL` in its skip reason, so a silent skip cannot pass for a pass
+(verified with `pytest -rs`: no skip has any other cause). The in-memory half of
+each contract runs everywhere.
+Working tree: clean; branch pushed, PR not yet opened
+Last updated: 2026-08-04
 
 **All three stages verified working end to end** — `tests/test_e2e_full_journey.py`
 drives manager interview → confirmed profile → employee interview → risk flags →
@@ -23,14 +26,25 @@ git log main..HEAD --format=%B     # full bodies with the evidence
 
 ---
 
-## ⚠️ Deployment constraint — read before deploying
+## ⚠️ Read before deploying — three environment variables are startup-fatal
 
-**Pin the deployment to a single uvicorn worker.** All session state is in-process
-(session store, graph registry, LangGraph `MemorySaver` checkpointers, document
-store). With two or more workers, a session created on worker A is invisible to
-worker B and the next message returns 404. See H3 below. `Dockerfile` currently
-runs a single process, so this holds today — but any change to worker count or
-autoscaling breaks live interviews silently.
+Outside `ENVIRONMENT=development`, the app refuses to start without these. Each
+one fails *silently and intermittently* if it is merely wrong rather than absent,
+which is why startup validation is loud instead:
+
+| Variable | Set it to | What happens without it |
+|---|---|---|
+| `DATABASE_URL` | the Postgres addon's URL | Every restart destroys in-flight interviews — sessions, checkpoints and generated documents all live in process memory |
+| `API_SECRET_KEY` | a long random string | Each process invents its own signing key, so every restart invalidates every live interview link, and with more than one worker tokens fail on whichever worker did not mint them |
+| `STAGE1_TO_STAGE2_LINK_TTL_HOURS` | `72`, or raise `SESSION_TTL_HOURS` to match | A link that outlives its session: the employee is told they have a week and gets "Session not found" on day four |
+
+**The single-worker pin is lifted.** It held while all state was in-process; H3
+made state durable and cross-process locking real. `Dockerfile` now runs
+`--workers ${WEB_CONCURRENCY:-1}` — the default stays 1 so raising it is
+deliberate, and startup refuses `WEB_CONCURRENCY > 1` without `DATABASE_URL`.
+Before raising it, read the connection budget in `config/settings.py`: each
+worker costs roughly `2 * DB_POOL_SIZE + DB_LOCK_POOL_SIZE` connections, and
+managed Postgres often caps at 100.
 
 ---
 
@@ -93,52 +107,73 @@ fix work itself, each fixed in its own commit:
 
 ---
 
-## Remaining work
+## The three findings that needed a decision — all now closed
 
-### Needs YOUR decision — do not let an agent guess these
+**H5 — Authentication posture.** *Decided: stage-scoped signed tokens.* PR #3.
+Every endpoint had been unauthenticated, with access resting on possession of an
+unguessable session UUID — and the Stage 2 link is *designed to be forwarded to
+the departing employee*, so the link was the credential and it was the manager's
+session id. Anyone holding it could read and write the manager's Stage 1
+interview and generate and download the handover pack, including the Risk Summary
+written about them.
 
-**H5 — Authentication posture.**
-Every endpoint is unauthenticated. Access control rests entirely on possession of
-an unguessable session UUID (capability-URL model). `API_SECRET_KEY` is declared
-in `config/settings.py:21` and referenced nowhere. There is no separation between
-the manager surface (Stage 1, review, generate) and the employee surface (Stage 2)
-— anyone holding a Stage 2 session ID can call `POST /sessions/{id}/generate`.
+Tokens are now HMAC-SHA256 signed with `API_SECRET_KEY`, carry `{sid, scope, exp}`
+and come in two scopes: `manager` (its own session plus the linked one, plus
+generate and download) and `employee` (that one session, never the document). The
+manager mints the employee's session, because minting an employee token requires
+proving you are the manager. See `api/auth.py` and `tests/test_auth.py`.
 
-The product handles sensitive HR content, and the Stage 2 link is *designed to be
-forwarded to the employee*, so capability URLs leak through history and referrers.
+| Commit | What it did |
+|---|---|
+| `e951570` | Gate every endpoint with stage-scoped tokens; auto-trigger Stage 3 |
+| `9a56f56` | Carry tokens through the frontend and rework the share link |
+| `2ecbff5` | Document the token model; mark `API_SECRET_KEY` required |
+| `e44361a` | Close a session-id enumeration oracle *I introduced* in `e951570` — Stage 2 creation looked up the session before authorising, so an existing id 401'd and an absent one 404'd |
+| `98b670b`, `fe75479` | Five further problems found reviewing my own branch |
 
-Pick one:
-- **(a)** Issue signed, expiring, stage-scoped tokens (HMAC with `API_SECRET_KEY`
-  or JWT), verified in a FastAPI dependency, gating generate/review/download; or
-- **(b)** Accept capability-UUIDs as a documented MVP tradeoff, and either wire in
-  or delete the dead `api_secret_key`.
+The CORS whitespace bug (`"a, b"` → a broken `" b"` origin) went with it:
+`parse_allowed_origins()` now strips.
 
-Also fix while in there: `api/routes.py:141-147` — `allowed_origins.split(",")`
-does not strip whitespace, so `"a, b"` yields a broken `" b"` origin.
+**M6 — Stage 3 auto-trigger.** *Decided: implement it, don't amend the spec.*
+`api/webhooks.py` only logged; generation was client-driven, so an employee who
+closed the tab at completion produced no document at all. Stage 3 now fires
+server-side on Stage 2 completion. Covered by `tests/test_stage3_autotrigger.py`.
 
-**M6 — Spec drift on Stage 3 auto-trigger.**
-CLAUDE.md says Stage 3 is "triggered automatically on Stage 2 completion".
-In code, `api/webhooks.py:14-19` only logs; generation is client-driven via
-`POST /sessions/{id}/generate`. Consequence: if the employee closes the tab at
-completion, no document is ever produced.
-Either implement server-side auto-trigger, or amend CLAUDE.md. They just need to agree.
+**H3 — Durable persistence.** *Decided: Postgres for everything, falling back to
+in-memory when `DATABASE_URL` is unset.* Four commits on
+`feat/h3-durable-persistence`:
 
-### Mechanical — safe to hand to agents
+| Commit | What it did |
+|---|---|
+| `e6405c7` | Postgres-backed session store behind the existing `SessionStore` Protocol, with one contract suite run against both backends |
+| `a28ca75` | `PostgresSaver` checkpointer; `GraphRegistry` rebuilt to reconstruct graphs from the store rather than cache live instances in a dict |
+| `214a55d` | Documents persisted as bytes in `kk_documents` rather than as files on a container-local disk |
+| `13013a2` | Cross-process advisory locks, `--workers ${WEB_CONCURRENCY:-1}`, connection-pool consolidation |
 
-**H3 — Durable persistence (its own workstream, do last).**
-Implement the existing `SessionStore` Protocol (`api/session_manager.py:9-17`)
-against Redis with TTL from `settings.session_ttl_hours`; replace `MemorySaver`
-with a persistent LangGraph checkpointer; persist the document/job stores. The
-`GraphRegistry` should reconstruct graphs bound to the shared checkpointer rather
-than caching live instances in a dict. Until this lands, see the deployment
-constraint at the top.
+Redis was the plan and was rejected on evidence, not preference: LangGraph's
+`RedisSaver.setup()` issues `FT._LIST`, a RediSearch command, and dies with
+`ResponseError: unknown command 'ft._list'` against the plain Redis addon a
+managed platform provides. Rationale is recorded in CLAUDE.md.
+
+`tests/test_restart_persistence.py` proves the point rather than asserting it: an
+interview is driven partway, the process state is thrown away, and it resumes.
+It also carries a false-positive guard — the in-memory path is asserted *not* to
+survive a restart, so a test that stopped exercising Postgres would fail rather
+than quietly pass. `tests/test_multi_worker.py` starts a genuine two-worker
+uvicorn, asserts the fixture really got two workers before testing anything, and
+inserts a session directly into Postgres so that neither worker created it.
 
 ---
 
-## Suggested next order
+## Remaining work
 
-1. **H5 and M6** — blocked on your decision, nothing else depends on them
-2. **H3** — separate scoped workstream; lifts the single-worker constraint
+Nothing from the original review is outstanding. Two things are known, flagged,
+and deliberately not fixed:
 
-Every mechanical finding from the original review is now fixed. What remains is
-two decisions and one infrastructure workstream.
+1. **The download token travels in a query string**, because `<a href>` downloads
+   cannot set an `Authorization` header — so it lands in uvicorn access logs. The
+   fix is a blob download on the frontend, which conflicts with emailed document
+   links being in MVP scope. Revisit when email delivery is built.
+2. **This file is a working document.** Delete it when the branch merges; the git
+   history is the permanent record, and every commit message carries the
+   reproduction evidence and measured before/after for its finding.

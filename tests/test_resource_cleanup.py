@@ -6,9 +6,8 @@ the generated files on disk. A long-running instance leaked memory and disk
 until it fell over.
 """
 
-import os
 import time
-from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,41 +27,83 @@ def reset_singletons():
 
 
 class TestGraphRegistryEviction:
-    def test_idle_instances_are_evicted(self):
+    """After H3 the registry caches locks, not graphs.
+
+    Graphs are compiled once per stage and rebuilt on demand against the shared
+    checkpointer, so there is no per-session object to evict — only the
+    per-session lock, which would otherwise grow for the life of the process.
+    """
+
+    def _seeded_registry(self, *session_ids):
+        from api.session_manager import get_session_store
+
+        store = get_session_store()
         registry = routes_mod.GraphRegistry()
-        registry.create_stage1("old-session")
-        registry.create_stage1("fresh-session")
+        created = {}
+        for name in session_ids:
+            session_id = store.create_session(stage=1)
+            created[name] = session_id
+            registry.create_stage1(session_id)
+        return registry, created
 
-        # Age one instance past the retention window.
-        registry._last_used["old-session"] = time.time() - 10_000
+    def test_idle_locks_are_released(self):
+        registry, ids = self._seeded_registry("old", "fresh")
+        registry.get_lock(ids["old"])
+        registry.get_lock(ids["fresh"])
 
-        evicted = registry.sweep_idle(max_idle_seconds=3600)
+        registry._last_used[ids["old"]] = time.time() - 10_000
 
-        assert evicted == 1
-        assert registry.get("old-session") is None
-        assert registry.get("fresh-session") is not None
+        assert registry.sweep_idle(max_idle_seconds=3600) == 1
+        assert ids["old"] not in registry._locks
+        assert ids["fresh"] in registry._locks
 
     def test_eviction_releases_the_lock_too(self):
-        registry = routes_mod.GraphRegistry()
-        registry.create_stage1("s1")
-        registry.get_lock("s1")
-        registry._last_used["s1"] = time.time() - 10_000
+        registry, ids = self._seeded_registry("s1")
+        registry.get_lock(ids["s1"])
+        registry._last_used[ids["s1"]] = time.time() - 10_000
 
         registry.sweep_idle(max_idle_seconds=3600)
 
-        assert "s1" not in registry._locks
-        assert "s1" not in registry._last_used
+        assert ids["s1"] not in registry._locks
+        assert ids["s1"] not in registry._last_used
 
     def test_activity_defers_eviction(self):
-        registry = routes_mod.GraphRegistry()
-        registry.create_stage1("s1")
-        registry._last_used["s1"] = time.time() - 10_000
+        registry, ids = self._seeded_registry("s1")
+        registry._last_used[ids["s1"]] = time.time() - 10_000
 
         # Accessing the session marks it in use again.
-        registry.get("s1")
+        registry.get(ids["s1"])
 
         assert registry.sweep_idle(max_idle_seconds=3600) == 0
-        assert registry.get("s1") is not None
+
+    def test_a_swept_session_is_still_servable(self):
+        """The point of H3: eviction must not strand a live interview.
+
+        Previously sweeping dropped the only copy of the graph, so the session
+        became unreachable and every message 404'd. Now the graph is rebuilt.
+        """
+        registry, ids = self._seeded_registry("s1")
+        registry.sweep_idle(max_idle_seconds=0)
+
+        assert registry.get(ids["s1"]) is not None, (
+            "a live session became unservable after its lock was released"
+        )
+
+    def test_get_reflects_the_session_store_not_a_cache(self):
+        from api.session_manager import get_session_store
+
+        registry = routes_mod.GraphRegistry()
+        session_id = get_session_store().create_session(stage=2)
+
+        # Never passed through create_stage2 — a second worker would be in
+        # exactly this position, having never seen the session created.
+        instance = registry.get(session_id)
+        assert instance is not None
+        assert instance.stage == 2
+
+    def test_unknown_session_has_no_graph(self):
+        registry = routes_mod.GraphRegistry()
+        assert registry.get("no-such-session") is None
 
 
 class TestSessionStoreSweep:
@@ -107,55 +148,79 @@ class TestSessionStoreSweep:
 
 
 class TestDocumentRetention:
-    def _make_document(self, doc_id: str, age_seconds: float) -> Path:
-        path = routes_mod._document_dir() / f"{doc_id}.docx"
-        path.write_bytes(b"fake docx")
-        routes_mod._document_store[doc_id] = str(path)
-        routes_mod._generation_jobs[doc_id] = {
-            "status": "complete", "download_url": f"/api/documents/{doc_id}", "error": None,
-        }
-        routes_mod._document_created_at[doc_id] = time.time() - age_seconds
-        return path
+    """Documents are bytes in the store now, not files on disk (H3).
 
-    def test_expired_documents_are_deleted_from_disk_and_memory(self):
-        stale = self._make_document("stale-doc", age_seconds=10_000_000)
-        fresh = self._make_document("fresh-doc", age_seconds=0)
+    Keeping them out of the container filesystem is deliberate: a handover pack
+    carries the Risk Summary written about a departing employee, and the managed
+    temp directory previously had to be chmod'ed 0o700 to stop other local users
+    reading it.
+    """
 
-        try:
-            routes_mod.sweep_resources(force=True)
+    def _documents(self):
+        from api.document_store import get_document_store
 
-            assert not stale.exists(), "expired document file was left on disk"
-            assert "stale-doc" not in routes_mod._document_store
-            assert "stale-doc" not in routes_mod._generation_jobs
-            assert "stale-doc" not in routes_mod._document_created_at
+        return get_document_store()
 
-            assert fresh.exists()
-            assert "fresh-doc" in routes_mod._document_store
-        finally:
-            for p in (stale, fresh):
-                if p.exists():
-                    os.remove(p)
+    def _make_document(self, doc_id: str, age_seconds: float) -> None:
+        store = self._documents()
+        store.start_job(doc_id, f"session-for-{doc_id}")
+        store.complete_job(doc_id, f"{doc_id}.docx", routes_mod.DOCX_MEDIA_TYPE, b"fake docx")
+        store._documents[doc_id]["created_at"] = time.time() - age_seconds
 
-    def test_sweep_survives_a_missing_file(self):
-        self._make_document("ghost-doc", age_seconds=10_000_000)
-        os.remove(routes_mod._document_store["ghost-doc"])
+    def test_expired_documents_are_dropped_and_fresh_ones_kept(self):
+        self._make_document("stale-doc", age_seconds=10_000_000)
+        self._make_document("fresh-doc", age_seconds=0)
 
-        # Must not raise even though the file is already gone.
         routes_mod.sweep_resources(force=True)
 
-        assert "ghost-doc" not in routes_mod._document_store
+        store = self._documents()
+        assert store.get_content("stale-doc") is None
+        assert store.get_job("stale-doc") is None
+        assert store.owner_of("stale-doc") is None
 
-    def test_documents_share_one_managed_directory(self):
-        a = self._make_document("doc-a", age_seconds=0)
-        b = self._make_document("doc-b", age_seconds=0)
-        try:
-            assert a.parent == b.parent == routes_mod._DOCUMENT_DIR, (
-                "each generation should not create its own temp directory"
+        assert store.get_content("fresh-doc") is not None
+
+    def test_the_swept_count_is_reported(self):
+        self._make_document("a", age_seconds=10_000_000)
+        self._make_document("b", age_seconds=10_000_000)
+        self._make_document("c", age_seconds=0)
+
+        assert routes_mod.sweep_resources(force=True)["documents"] == 2
+
+    def test_a_swept_document_takes_its_session_pointer_with_it(self):
+        self._make_document("orphan-doc", age_seconds=10_000_000)
+        store = self._documents()
+        assert store.document_for_session("session-for-orphan-doc") == "orphan-doc"
+
+        routes_mod.sweep_resources(force=True)
+
+        assert store.document_for_session("session-for-orphan-doc") is None
+
+    def test_generation_leaves_no_file_behind(self):
+        """The exporters write a file; it must not outlive the export."""
+        from api.document_store import get_document_store
+        from output.formatters.document_formatter import InterimDocument
+
+        doc_dir = routes_mod._document_dir()
+        before = set(doc_dir.iterdir())
+
+        with patch("api.routes.generate_document") as gen, \
+             patch("api.routes.parse_llm_output"), \
+             patch("api.routes.generate_docx") as docx:
+            gen.return_value = MagicMock(raw_markdown="# Handover")
+            docx.side_effect = lambda d, p: (open(p, "wb").write(b"PACK"), p)[1]
+
+            get_document_store().start_job("transient-doc", "some-session")
+            routes_mod._run_generation_in_background(
+                "transient-doc", "some-session", MagicMock(), MagicMock(), "docx"
             )
-        finally:
-            for p in (a, b):
-                if p.exists():
-                    os.remove(p)
+
+        assert set(doc_dir.iterdir()) == before, (
+            "an exported handover pack was left on the container filesystem"
+        )
+        assert get_document_store().get_content("transient-doc") == (
+            "transient-doc.docx", routes_mod.DOCX_MEDIA_TYPE, b"PACK"
+        )
 
 
 class TestSweepRateLimiting:

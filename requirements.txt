@@ -10,6 +10,12 @@ pydantic-settings>=2.0.0
 fastapi>=0.110.0
 uvicorn>=0.27.0
 
+# Persistence (H3) — sessions, profiles and LangGraph checkpoints.
+# Without DATABASE_URL the app falls back to in-process state, which does not
+# survive a restart; production refuses to start without it.
+psycopg[binary,pool]>=3.2.0
+langgraph-checkpoint-postgres>=2.0.0
+
 # Document output
 python-docx>=1.1.0
 # weasyprint>=62.0  # Optional — requires system libraries (cairo, pango). PDF falls back to DOCX if unavailable.

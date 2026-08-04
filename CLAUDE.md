@@ -23,7 +23,7 @@ The Role Intelligence Profile produced in Stage 1 is passed as structured contex
 ## CORE ARCHITECTURE PRINCIPLES
 
 **1. Stages are isolated conversation sessions**
-Stage 1 and Stage 2 must never share a live conversation thread. They are separate LangGraph graph instances, each with their own session ID. The Role Intelligence Profile is the only data passed between them — via Redis or database lookup, never via a shared context window.
+Stage 1 and Stage 2 must never share a live conversation thread. They are separate LangGraph graph instances, each with their own session ID. The Role Intelligence Profile is the only data passed between them — via a database lookup, never via a shared context window.
 
 **2. The Role Intelligence Profile is the system's spine**
 Every decision in Stage 2 — which blocks to run at full depth, which to run lightly, what tone to use, which risk categories to prioritise — is derived from the Role Intelligence Profile. Treat it as the single source of truth for a session. Its Pydantic schema must be strictly validated before Stage 2 activates.
@@ -113,8 +113,8 @@ Relying on the main model to self-decide when to follow up creates inconsistency
 **Why generate Stage 3 in a single call rather than section by section?**
 Cross-referencing between sections (e.g. a risk flag in Section 2 referencing a relationship in Section 5) requires the full context to be present at generation time. Section-by-section generation loses this coherence.
 
-**Why Redis for session state between stages?**
-The gap between Stage 1 and Stage 2 could be hours or days (the manager completes Stage 1, then shares the link with the employee). Redis with a TTL handles this naturally without keeping a database connection warm.
+**Why Postgres for session state between stages, rather than Redis?**
+The gap between Stage 1 and Stage 2 could be hours or days (the manager completes Stage 1, then shares the link with the employee), so the state has to outlive the process — a redeploy in that window must not destroy an in-flight interview. Redis was the original plan, but LangGraph's `RedisSaver.setup()` issues `FT._LIST`, a RediSearch command: it requires Redis Stack, not the plain Redis addon a managed platform gives you, and it fails at startup with `ResponseError: unknown command 'ft._list'`. Postgres already had to be in the stack for durable documents and cross-worker locking, so everything now lives there: sessions and profiles (`kk_sessions`, `kk_profiles`, `kk_session_links`), LangGraph checkpoints (`PostgresSaver`), generated documents as bytes (`kk_documents`), and `pg_advisory_lock` to serialise a session's graph run across workers. TTL is enforced by an expiry sweep rather than by the store. When `DATABASE_URL` is unset the app falls back to in-memory equivalents — fine for tests and local runs, fatal at startup outside development. See `api/postgres_store.py`.
 
 **Why stage-scoped signed tokens rather than unguessable session URLs?**
 The Stage 2 link is *designed to be forwarded to the departing employee*, so a capability-URL model makes the link itself the credential — and it was the manager's session id. Anyone holding it could read and write the manager's Stage 1 interview, and could generate and download the handover pack including the Risk Summary written about them. Tokens are HMAC-signed with `API_SECRET_KEY`, carry `{session_id, scope, exp}`, and come in two scopes: `manager` (authorises its own session and the linked one, plus generate/download) and `employee` (that one session only, never the document). See `api/auth.py`.

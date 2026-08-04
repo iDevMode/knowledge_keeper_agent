@@ -45,16 +45,13 @@ def fixed_secret():
 
 @pytest.fixture(autouse=True)
 def reset_singletons():
+    import api.document_store as doc_mod
     import api.routes as routes_mod
     import api.session_manager as sm_mod
 
     sm_mod._store = None
     routes_mod._registry = routes_mod.GraphRegistry()
-    routes_mod._document_store.clear()
-    routes_mod._document_owner.clear()
-    routes_mod._session_document.clear()
-    routes_mod._session_generation_error.clear()
-    routes_mod._generation_jobs.clear()
+    doc_mod.reset_document_store()
     yield
 
 
@@ -238,20 +235,17 @@ class TestEmployeeCannotReachTheManagersInterview:
 
 class TestEmployeeCannotObtainTheHandoverPack:
     @pytest.fixture
-    def document(self, tmp_path, engagement):
-        import api.routes as routes_mod
-
-        path = tmp_path / "pack.docx"
-        path.write_bytes(b"RISK SUMMARY: sole owner of reconciliation")
+    def document(self, engagement):
+        from api.document_store import get_document_store
+        from api.routes import DOCX_MEDIA_TYPE
 
         doc_id = "doc-under-test"
-        routes_mod._document_store[doc_id] = str(path)
-        routes_mod._document_owner[doc_id] = engagement["stage2_id"]
-        routes_mod._generation_jobs[doc_id] = {
-            "status": "complete",
-            "download_url": f"/api/documents/{doc_id}",
-            "error": None,
-        }
+        store = get_document_store()
+        store.start_job(doc_id, engagement["stage2_id"])
+        store.complete_job(
+            doc_id, "pack.docx", DOCX_MEDIA_TYPE,
+            b"RISK SUMMARY: sole owner of reconciliation",
+        )
         return doc_id
 
     def test_employee_cannot_generate(self, client, engagement):
@@ -365,10 +359,16 @@ class TestStage2CreationIsIdempotent:
         )
         assert response.status_code == 200, "the first employee session was orphaned"
 
-    def test_a_session_with_no_graph_is_replaced_rather_than_reissued(
+    def test_registry_bookkeeping_loss_does_not_strand_the_session(
         self, client, engagement
     ):
-        """Reissuing a token for a session with no graph hands out a dead link."""
+        """Before H3 this had to create a replacement session.
+
+        The graph lived only in a process dictionary, so losing it meant the
+        employee opened their link to a blank chat and every message 404'd. The
+        graph is now rebuilt from the shared checkpointer, so the same session
+        is reused and the opening question comes back with it.
+        """
         import api.routes as routes_mod
 
         routes_mod._registry.remove(engagement["stage2_id"])
@@ -384,8 +384,8 @@ class TestStage2CreationIsIdempotent:
             )
 
         assert response.status_code == 200
-        assert response.json()["session_id"] != engagement["stage2_id"]
-        assert response.json()["message"], "the employee would see a blank chat"
+        assert response.json()["session_id"] == engagement["stage2_id"]
+        assert response.json()["message"], "the opening question was lost"
 
     def test_the_reissued_token_works(self, client, engagement):
         reissued = client.post(
