@@ -7,6 +7,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from agents import answers as answer_store
 from agents.parsing import ClassifierParseError, extract_json
 from agents.text_utils import enforce_single_question, validate_single_question
 from agents.stage1_business_interview.prompts import (
@@ -138,7 +139,11 @@ def ask_question_node(state: Stage1State) -> Dict[str, Any]:
 
 
 def process_answer_node(state: Stage1State) -> Dict[str, Any]:
-    """Store the user's answer keyed by block.index."""
+    """Append the manager's answer to the exchange keyed by block.index.
+
+    Appends rather than assigns, and leaves `followup_count` alone; see the
+    Stage 2 node of the same name for why both matter.
+    """
     block = state["current_block"]
     index = state["current_question_index"]
     session_id = state.get("session_id", "")
@@ -150,14 +155,10 @@ def process_answer_node(state: Stage1State) -> Dict[str, Any]:
 
     logger.info("session=%s stage=1 block=%s question=%d node=process_answer", session_id, block, index)
 
-    answers = dict(state.get("answers", {}))
     key = f"{block}.{index}"
-    answers[key] = answer_text
+    answers = answer_store.append(state.get("answers"), key, answer_text)
 
-    return {
-        "answers": answers,
-        "followup_count": 0,
-    }
+    return {"answers": answers}
 
 
 def followup_classifier_node(state: Stage1State) -> Dict[str, Any]:
