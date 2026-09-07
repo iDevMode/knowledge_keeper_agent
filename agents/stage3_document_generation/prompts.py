@@ -3,6 +3,11 @@ from typing import Any, Dict, List, Optional
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from agents import answers as answer_store
+from agents.stage2_employee_interview.prompts import (
+    BLOCK_QUESTIONS,
+    CLOSING_QUESTIONS,
+    ROLE_ORIENTATION_QUESTIONS,
+)
 from models.risk_flags import RiskFlag
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -189,7 +194,27 @@ def _format_risk_flags(risk_flags: List[RiskFlag]) -> str:
     return "\n".join(lines)
 
 
-def _format_exchange(key: str, replies: List[str]) -> List[str]:
+def _question_brief(block: str, index: int) -> str:
+    """The instruction the Stage 2 agent was given for this question.
+
+    The question banks hold interviewer briefs ("Ask them to walk you
+    through...") rather than literal question text, because the agent phrases
+    each one in context. The brief still states the subject, which is what the
+    synthesis model needs and what "Q3:" alone never told it.
+    """
+    if block == "role_orientation":
+        questions = ROLE_ORIENTATION_QUESTIONS
+    elif block == "closing_sequence":
+        questions = CLOSING_QUESTIONS
+    else:
+        questions = BLOCK_QUESTIONS.get(block, [])
+
+    if 0 <= index < len(questions):
+        return questions[index]
+    return ""
+
+
+def _format_exchange(block: str, key: str, replies: List[str]) -> List[str]:
     """Render one question and everything the employee said in reply to it.
 
     Follow-up answers are labelled rather than merged: the synthesis model can
@@ -199,7 +224,11 @@ def _format_exchange(key: str, replies: List[str]) -> List[str]:
     index = int(key.split(".")[1])
     lines = []
 
-    lines.append(f"Q{index}:")
+    brief = _question_brief(block, index)
+    if brief:
+        lines.append(f"Q{index} [interviewer brief]: {brief}")
+    else:
+        lines.append(f"Q{index}:")
 
     if not replies:
         lines.append("A: [no answer recorded]")
@@ -231,7 +260,7 @@ def _format_answers_by_block(
             return
         lines.append(header)
         for key in sorted(keys, key=lambda k: int(k.split(".")[1])):
-            lines.extend(_format_exchange(key, store[key]))
+            lines.extend(_format_exchange(block, key, store[key]))
         lines.append("")
 
     # Role orientation first
