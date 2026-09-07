@@ -26,6 +26,7 @@ from api.auth import (
     verify_token,
 )
 from api.routes import parse_allowed_origins
+from config.settings import uses_transaction_pooler
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
 FIXTURE = "tests/fixtures/sample_role_profiles.json"
@@ -452,6 +453,88 @@ class TestTokenNeverOutlivesItsSession:
         with pytest.raises(SystemExit):
             bad.validate_for_production()
         assert "SESSION_TTL_HOURS" in capsys.readouterr().err
+
+
+# ---- Connection pooling mode ----
+
+class TestTransactionPoolerIsRejected:
+    """A transaction-mode pooler URL breaks advisory locks silently.
+
+    api/postgres_store.py holds a session-scoped pg_advisory_lock across a whole
+    interview turn so two workers cannot drive one LangGraph thread at once. In
+    transaction mode the lock and the unlock can land on different backends, so
+    the lock stops serialising with no error and no log line. Startup has to be
+    the thing that catches it, because nothing downstream will.
+    """
+
+    @pytest.mark.parametrize("url", [
+        "postgresql://postgres.ref:pw@aws-0-eu-west-2.pooler.supabase.com:6543/postgres",
+        "postgres://u:p%40x@host.pooler.supabase.com:6543/postgres?sslmode=require",
+    ])
+    def test_transaction_pooler_urls_are_detected(self, url):
+        assert uses_transaction_pooler(url) is True
+
+    @pytest.mark.parametrize("url", [
+        # Session pooler — the one to use.
+        "postgresql://postgres.ref:pw@aws-0-eu-west-2.pooler.supabase.com:5432/postgres",
+        # Direct connection.
+        "postgresql://postgres:pw@db.abcdef.supabase.co:5432/postgres",
+        # No explicit port.
+        "postgresql://u:p@host/db",
+        "",
+    ])
+    def test_ordinary_urls_are_left_alone(self, url):
+        assert uses_transaction_pooler(url) is False
+
+    def test_a_malformed_url_does_not_raise(self):
+        """urlsplit().port raises on a non-numeric port; psycopg gives the better error."""
+        assert uses_transaction_pooler("postgresql://u:p@host:not-a-port/db") is False
+        assert uses_transaction_pooler("not a url") is False
+
+    def _settings(self, url, **overrides):
+        from config.settings import Settings
+
+        return Settings(
+            _env_file=None,
+            anthropic_api_key="x",
+            api_secret_key="x",
+            environment="production",
+            allowed_origins="https://example.com",
+            database_url=url,
+            **overrides,
+        )
+
+    def test_startup_refuses_a_transaction_pooler_with_multiple_workers(self, capsys, monkeypatch):
+        monkeypatch.setenv("WEB_CONCURRENCY", "2")
+        bad = self._settings(
+            "postgresql://postgres.ref:pw@aws-0-eu-west-2.pooler.supabase.com:6543/postgres"
+        )
+        with pytest.raises(SystemExit):
+            bad.validate_for_production()
+        err = capsys.readouterr().err
+        assert "6543" in err
+        assert "advisory locks" in err
+
+    def test_startup_warns_but_proceeds_on_a_single_worker(self, capsys, monkeypatch):
+        """One worker serialises in-process, so this is wrong but not yet broken."""
+        monkeypatch.setenv("WEB_CONCURRENCY", "1")
+        risky = self._settings(
+            "postgresql://postgres.ref:pw@aws-0-eu-west-2.pooler.supabase.com:6543/postgres"
+        )
+        risky.validate_for_production()
+        err = capsys.readouterr().err
+        assert "[WARN]" in err
+        assert "session-mode pooler" in err
+
+    def test_the_session_pooler_passes_cleanly(self, capsys, monkeypatch):
+        monkeypatch.setenv("WEB_CONCURRENCY", "2")
+        good = self._settings(
+            "postgresql://postgres.ref:pw@aws-0-eu-west-2.pooler.supabase.com:5432/postgres"
+        )
+        good.validate_for_production()
+        err = capsys.readouterr().err
+        assert "6543" not in err
+        assert "[FATAL]" not in err
 
 
 # ---- CORS origin parsing ----

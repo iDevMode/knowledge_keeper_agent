@@ -1,7 +1,27 @@
 import os
 import sys
+from urllib.parse import urlsplit
 
 from pydantic_settings import BaseSettings
+
+
+# Supabase's Supavisor listens on 6543 for transaction mode and 5432 for session
+# mode. PgBouncer deployments conventionally use the same 6543. Only the port is
+# checked: the hostname varies by provider and region, and a URL that reaches a
+# transaction pooler on any host has the same problem.
+_TRANSACTION_POOLER_PORT = 6543
+
+
+def uses_transaction_pooler(database_url: str) -> bool:
+    """Whether a connection URL points at a transaction-mode connection pooler.
+
+    Best-effort by port. A malformed URL returns False and is left to psycopg to
+    reject with a better message than this could produce.
+    """
+    try:
+        return urlsplit(database_url).port == _TRANSACTION_POOLER_PORT
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
@@ -105,6 +125,26 @@ class Settings(BaseSettings):
             )
         if self.allowed_origins == "http://localhost:3000" and self.environment != "development":
             errors.append("ALLOWED_ORIGINS is still set to localhost — set to your production domain")
+        if self.database_url and uses_transaction_pooler(self.database_url):
+            # Session-scoped state does not survive transaction pooling.
+            # PostgresSessionLocks holds a pg_advisory_lock on one connection for
+            # the whole of an interview turn; in transaction mode the lock and
+            # the unlock can land on different backends, so the lock stops
+            # serialising anything — with no error and no log line. That is the
+            # exact cross-worker checkpoint interleaving the lock exists to
+            # prevent, so it is fatal once there is more than one worker and a
+            # loud warning below that.
+            message = (
+                "DATABASE_URL points at a transaction-mode pooler (port "
+                f"{_TRANSACTION_POOLER_PORT}) — session-scoped advisory locks do "
+                "not work there, so concurrent requests for one session can "
+                "interleave checkpoint writes. Use the session-mode pooler "
+                "(port 5432) or a direct connection"
+            )
+            if worker_count > 1:
+                errors.append(f"{message} — required because WEB_CONCURRENCY is {worker_count}")
+            else:
+                print(f"[WARN] {message}", file=sys.stderr)
         if self.stage1_to_stage2_link_ttl_hours > self.session_ttl_hours:
             # The employee link cannot outlive the session it points at. With
             # the defaults (168 vs 72) an employee was told they had a week and
