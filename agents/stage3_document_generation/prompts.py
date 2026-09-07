@@ -1,7 +1,8 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from agents import answers as answer_store
 from models.risk_flags import RiskFlag
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
@@ -72,7 +73,7 @@ def build_context_block(
     profile: RoleIntelligenceProfile,
     conversation_history: List[BaseMessage],
     risk_flags: List[RiskFlag],
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     block_order: List[str],
     block_depths: Dict[str, str],
 ) -> str:
@@ -188,44 +189,62 @@ def _format_risk_flags(risk_flags: List[RiskFlag]) -> str:
     return "\n".join(lines)
 
 
+def _format_exchange(key: str, replies: List[str]) -> List[str]:
+    """Render one question and everything the employee said in reply to it.
+
+    Follow-up answers are labelled rather than merged: the synthesis model can
+    see that a detail was volunteered only after probing, which is a signal
+    about how firmly it is held.
+    """
+    index = int(key.split(".")[1])
+    lines = []
+
+    lines.append(f"Q{index}:")
+
+    if not replies:
+        lines.append("A: [no answer recorded]")
+        return lines
+
+    lines.append(f"A: {replies[0]}")
+    for reply in replies[1:]:
+        lines.append(f"A (follow-up): {reply}")
+    return lines
+
+
 def _format_answers_by_block(
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     block_order: List[str],
     block_depths: Dict[str, str],
 ) -> str:
-    """Group answers by block in priority order."""
+    """Group answers by block in priority order, each under its question.
+
+    The transcript previously rendered `Q3: <answer>` with the question itself
+    omitted, so the synthesis model had to infer what had been asked from the
+    answer alone.
+    """
+    store = answer_store.coerce(answers)
     lines = []
 
-    # Role orientation first
-    orientation_answers = {k: v for k, v in answers.items() if k.startswith("role_orientation.")}
-    if orientation_answers:
-        lines.append("### Role Orientation")
-        for key in sorted(orientation_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {orientation_answers[key]}")
+    def section(header: str, block: str) -> None:
+        keys = [k for k in store if k.startswith(f"{block}.")]
+        if not keys:
+            return
+        lines.append(header)
+        for key in sorted(keys, key=lambda k: int(k.split(".")[1])):
+            lines.extend(_format_exchange(key, store[key]))
         lines.append("")
+
+    # Role orientation first
+    section("### Role Orientation", "role_orientation")
 
     # Knowledge blocks in priority order
     for block in block_order:
-        block_answers = {k: v for k, v in answers.items() if k.startswith(f"{block}.")}
-        if not block_answers:
-            continue
         depth = block_depths.get(block, "full")
         label = block.replace("_", " ").title()
-        lines.append(f"### {label} [{depth} depth]")
-        for key in sorted(block_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {block_answers[key]}")
-        lines.append("")
+        section(f"### {label} [{depth} depth]", block)
 
     # Closing sequence
-    closing_answers = {k: v for k, v in answers.items() if k.startswith("closing_sequence.")}
-    if closing_answers:
-        lines.append("### Closing Questions")
-        for key in sorted(closing_answers.keys(), key=lambda k: int(k.split(".")[1])):
-            index = key.split(".")[1]
-            lines.append(f"Q{index}: {closing_answers[key]}")
-        lines.append("")
+    section("### Closing Questions", "closing_sequence")
 
     return "\n".join(lines)
 
@@ -250,7 +269,7 @@ def _format_conversation_excerpts(conversation_history: List[BaseMessage]) -> st
 
 def _build_generation_instruction(
     profile: RoleIntelligenceProfile,
-    answers: Dict[str, str],
+    answers: Dict[str, Any],
     risk_flags: List[RiskFlag],
 ) -> str:
     """Build the generation instruction with profile-specific values."""

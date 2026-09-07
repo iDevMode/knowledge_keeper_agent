@@ -128,9 +128,38 @@ class TestProcessAnswerNode:
             ],
         )
         result = process_answer_node(state)
-        assert result["answers"]["business_context.1"] == "We have 3 teams of 5 people each."
+        assert result["answers"]["business_context.1"] == ["We have 3 teams of 5 people each."]
 
-    def test_resets_followup_count(self):
+    def test_appends_follow_up_answers_instead_of_overwriting(self):
+        first = _make_state(
+            current_block="business_context",
+            current_question_index=1,
+            conversation_history=[
+                AIMessage(content="How is the team structured?"),
+                HumanMessage(content="We have 3 teams of 5 people each."),
+            ],
+        )
+        after_first = process_answer_node(first)
+
+        followup = _make_state(
+            current_block="business_context",
+            current_question_index=1,
+            followup_count=1,
+            answers=after_first["answers"],
+            conversation_history=[
+                AIMessage(content="Who leads each team?"),
+                HumanMessage(content="Two team leads and one vacancy."),
+            ],
+        )
+        result = process_answer_node(followup)
+
+        assert result["answers"]["business_context.1"] == [
+            "We have 3 teams of 5 people each.",
+            "Two team leads and one vacancy.",
+        ]
+
+    def test_does_not_reset_followup_count(self):
+        """See the Stage 2 test of the same name — the reset made the cap unreachable."""
         state = _make_state(
             current_block="vacant_role",
             current_question_index=0,
@@ -138,7 +167,7 @@ class TestProcessAnswerNode:
             conversation_history=[HumanMessage(content="Software Engineer in Product team")],
         )
         result = process_answer_node(state)
-        assert result["followup_count"] == 0
+        assert "followup_count" not in result
 
 
 # ---- TestRouting ----

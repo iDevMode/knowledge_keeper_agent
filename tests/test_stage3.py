@@ -211,6 +211,29 @@ class TestContextAssembly:
         block_pos = formatted.find("Internal Processes Workflows")
         assert orientation_pos < block_pos
 
+    def test_transcript_labels_follow_up_answers_separately(self):
+        formatted = _format_answers_by_block(
+            {
+                "internal_processes_workflows.0": [
+                    "I run the reconciliation macro, then check three banks.",
+                    "Premier, Lloyds and the Dutch one.",
+                ]
+            },
+            ["internal_processes_workflows"],
+            {"internal_processes_workflows": "full"},
+        )
+        assert "A: I run the reconciliation macro, then check three banks." in formatted
+        assert "A (follow-up): Premier, Lloyds and the Dutch one." in formatted
+
+    def test_transcript_renders_a_legacy_string_valued_answer(self):
+        """A checkpoint written before the list-valued store still generates."""
+        formatted = _format_answers_by_block(
+            {"closing_sequence.1": "Trust the macro, not the docs."},
+            [],
+            {},
+        )
+        assert "A: Trust the macro, not the docs." in formatted
+
     def test_no_risk_flags_omits_section(self):
         req = _make_generation_request("process_heavy")
         context = build_context_block(

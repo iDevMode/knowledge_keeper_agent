@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Dict, List, Optional
 
 from langchain_core.messages import BaseMessage
 from typing_extensions import TypedDict
@@ -20,7 +20,9 @@ class Stage2State(TypedDict):
     block_depths: Dict[str, str]  # block name -> "full" or "light"
     followup_count: int
     pending_followup: Optional[str]
-    answers: Dict[str, Any]  # keyed by "{block}.{index}"
+    # keyed by "{block}.{index}" -> [original answer, follow-up answers...].
+    # One question can hold a whole exchange; see agents/answers.py.
+    answers: Dict[str, List[str]]
     conversation_history: Annotated[List[BaseMessage], operator.add]
     # Append-only via a reducer. risk_flag_classifier runs as a parallel branch
     # alongside followup_classifier, so a plain list would let the two concurrent
