@@ -10,13 +10,22 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-# System deps for python-docx (minimal — no WeasyPrint for now)
+# System libraries WeasyPrint needs to render PDFs (Pango for text layout,
+# HarfBuzz for shaping, fontconfig + a font so text actually has glyphs).
+# Without these, `import weasyprint` raises OSError and every PDF request
+# silently came back as a .docx.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libharfbuzz0b \
+        libharfbuzz-subset0 \
+        libfontconfig1 \
+        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt anthropic
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app code
 COPY . .

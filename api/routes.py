@@ -690,7 +690,13 @@ def _run_generation_in_background(
                 file_path = generate_pdf(interim_doc, os.path.join(output_dir, f"{document_id}.pdf"))
                 media_type = "application/pdf"
             except (ImportError, RuntimeError) as e:
-                logger.warning("PDF export unavailable (%s), falling back to DOCX", e)
+                # An error, not a warning: the manager asked for a PDF and is
+                # getting a .docx. In production this means the image is missing
+                # WeasyPrint's system libraries (see Dockerfile).
+                logger.error(
+                    "session=%s document=%s PDF export unavailable (%s), falling back to DOCX",
+                    session_id, document_id, e,
+                )
                 file_path = generate_docx(interim_doc, file_path)
         else:
             file_path = generate_docx(interim_doc, file_path)

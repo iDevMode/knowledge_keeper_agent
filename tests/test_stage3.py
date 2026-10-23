@@ -475,6 +475,32 @@ class TestPdfExporter:
             generate_pdf(doc, output_path)
             mock_weasy.assert_called_once()
 
+    def test_renders_a_real_pdf(self):
+        """Not mocked: proves WeasyPrint and its system libraries actually load.
+
+        The production image shipped without them, so every PDF request was
+        silently served as DOCX while the mocked test above stayed green.
+        """
+        from output.exporters.pdf_exporter import WEASYPRINT_AVAILABLE, generate_pdf
+
+        assert WEASYPRINT_AVAILABLE, (
+            "WeasyPrint could not load — install it and its system libraries "
+            "(libpango-1.0-0, libpangoft2-1.0-0, libharfbuzz0b, fonts)"
+        )
+        profile = _load_profile("process_heavy")
+        doc = parse_llm_output(_build_valid_markdown("process_heavy"), profile, "pdf-test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = os.path.join(tmp_dir, "pack.pdf")
+            generate_pdf(doc, output_path)
+            with open(output_path, "rb") as f:
+                content = f.read()
+        assert content.startswith(b"%PDF-")
+        # A full pack runs to several pages; a render that lost its content
+        # (e.g. no usable font) would not.
+        from output.exporters.pdf_exporter import WeasyHTML
+        pages = WeasyHTML(string=_build_html(doc)).render().pages
+        assert len(pages) >= 2
+
     def test_html_contains_title(self):
         doc = InterimDocument(
             session_id="test",
