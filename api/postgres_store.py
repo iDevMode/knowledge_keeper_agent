@@ -77,6 +77,64 @@ CREATE TABLE IF NOT EXISTS kk_generation_errors (
 """
 
 
+# Arbitrary, fixed advisory-lock key that serialises schema creation.
+SCHEMA_LOCK_KEY = 0x6B6B5F736368656D  # "kk_schem"
+
+
+def apply_schema(conn) -> None:
+    """Create or upgrade the tables, one process at a time.
+
+    Every worker runs SCHEMA when its stores are first built, which is on its
+    first request. Under load several workers do that at the same moment, and
+    concurrent DDL against the same tables deadlocked in Postgres ("deadlock
+    detected ... AccessExclusiveLock"), failing one of those first requests
+    with a 500. A transaction-scoped advisory lock makes them queue instead;
+    after the first, each run is a cheap no-op.
+    """
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
+        conn.execute(SCHEMA)
+
+
+# A separate key from SCHEMA_LOCK_KEY: see setup_checkpointer.
+CHECKPOINTER_LOCK_KEY = 0x6B6B5F636B707400  # "kk_ckpt"
+
+
+def setup_checkpointer(saver: Any, pool: ConnectionPool, timeout: float = 120.0) -> None:
+    """Run LangGraph's PostgresSaver.setup() one process at a time.
+
+    setup() applies the checkpointer's own table migrations. On a fresh
+    database, several workers running it together collide in the catalog
+    (DuplicateObject / UniqueViolation), and the worker that loses fails its
+    first request with a 500 — the same race as apply_schema, in tables we do
+    not own.
+
+    The lock is taken with pg_try_advisory_lock in a polling loop, not the
+    blocking form. Those migrations include CREATE INDEX CONCURRENTLY, which
+    waits for every transaction in progress — including a worker blocked inside
+    pg_advisory_lock, which is itself waiting for the holder to finish. That
+    deadlock is invisible to Postgres and simply hangs. Polling means a waiter
+    holds no open statement between attempts. A key of its own keeps it clear
+    of apply_schema, whose lock is held inside a transaction.
+    """
+    deadline = time.time() + timeout
+    with pool.connection() as conn:
+        while True:
+            row = conn.execute(
+                "SELECT pg_try_advisory_lock(%s) AS locked", (CHECKPOINTER_LOCK_KEY,)
+            ).fetchone()
+            locked = row["locked"] if isinstance(row, dict) else row[0]
+            if locked:
+                break
+            if time.time() > deadline:
+                raise TimeoutError("timed out waiting for another worker's checkpointer setup")
+            time.sleep(0.1)
+        try:
+            saver.setup()
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (CHECKPOINTER_LOCK_KEY,))
+
+
 _shared_pool: Optional[ConnectionPool] = None
 _pool_guard = threading.Lock()
 
@@ -135,7 +193,7 @@ class PostgresSessionStore:
 
     def ensure_schema(self) -> None:
         with self._pool.connection() as conn:
-            conn.execute(SCHEMA)
+            apply_schema(conn)
 
     # -- sessions --------------------------------------------------------
 
@@ -319,7 +377,7 @@ class PostgresDocumentStore:
         self._owns_pool = pool is None and bool(conninfo)
         self._pool = _pool_for(conninfo, pool, settings.db_pool_size)
         with self._pool.connection() as conn:
-            conn.execute(SCHEMA)
+            apply_schema(conn)
 
     def start_job(self, document_id: str, session_id: str) -> None:
         with self._pool.connection() as conn:
