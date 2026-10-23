@@ -12,6 +12,10 @@ A token binds a caller to one session and one scope:
                 linked Stage 2 session, plus generate/download.
     employee  — issued when Stage 2 is created, for the departing employee.
                 Authorises only that one session. Never generate or download.
+    account   — issued when a manager signs in by magic link. Bound to the
+                manager's id (in the `sid` field), not to any session, so it
+                authorises no session endpoint by itself. It lists the manager's
+                handovers and exchanges ownership of one for a manager token.
 
 Tokens are `base64url(payload).base64url(hmac_sha256(secret, payload))`, which
 keeps them self-contained: no server-side token table to persist, so this works
@@ -37,12 +41,13 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-Scope = Literal["manager", "employee"]
+Scope = Literal["manager", "employee", "account"]
 
 MANAGER: Scope = "manager"
 EMPLOYEE: Scope = "employee"
+ACCOUNT: Scope = "account"
 
-_VALID_SCOPES = frozenset({MANAGER, EMPLOYEE})
+_VALID_SCOPES = frozenset({MANAGER, EMPLOYEE, ACCOUNT})
 
 # Generated once per process when API_SECRET_KEY is unset, so local development
 # works without configuration. Tokens then die with the process, which is
@@ -64,6 +69,17 @@ class TokenClaims:
     @property
     def is_manager(self) -> bool:
         return self.scope == MANAGER
+
+    @property
+    def is_account(self) -> bool:
+        return self.scope == ACCOUNT
+
+    @property
+    def manager_id(self) -> str:
+        """For an account token, the subject is the manager, not a session."""
+        if not self.is_account:
+            raise AttributeError("only account tokens carry a manager id")
+        return self.session_id
 
 
 def _secret() -> str:

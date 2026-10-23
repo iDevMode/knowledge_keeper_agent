@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     # e.g. https://knowledgekeeper.nukode.co.uk
     public_base_url: str = "http://localhost:3000"
 
+    # Manager accounts
+    # How long a manager stays signed in after using a magic link.
+    account_session_days: int = 30
+    # How long an emailed sign-in link works. Single use either way.
+    login_link_ttl_minutes: int = 15
+    # Sign-in emails per address per window, so the form cannot be used to
+    # flood someone's inbox.
+    login_requests_per_window: int = 5
+    login_request_window_minutes: int = 15
+
     # API
     api_secret_key: str = ""
     allowed_origins: str = "http://localhost:3000"
@@ -114,6 +124,13 @@ class Settings(BaseSettings):
             errors.append(
                 "API_SECRET_KEY is not set — session tokens would not survive a restart"
             )
+        if (
+            self.environment != "development"
+            and self.public_base_url.startswith("http://localhost")
+        ):
+            errors.append(
+                "PUBLIC_BASE_URL is still localhost — sign-in links in emails would not work"
+            )
         if self.allowed_origins == "http://localhost:3000" and self.environment != "development":
             errors.append("ALLOWED_ORIGINS is still set to localhost — set to your production domain")
         if self.stage1_to_stage2_link_ttl_hours > self.session_ttl_hours:
@@ -129,9 +146,11 @@ class Settings(BaseSettings):
             )
         if self.environment != "development":
             if not self.sendgrid_api_key:
-                print(
-                    "[WARN] SENDGRID_API_KEY is not set — handover packs will not be emailed",
-                    file=sys.stderr,
+                # Managers sign in by emailed link, so without email nobody can
+                # start a handover. Refuse rather than run unusable.
+                errors.append(
+                    "SENDGRID_API_KEY is not set — managers could not receive "
+                    "sign-in links"
                 )
             elif not self.email_from_address:
                 errors.append(

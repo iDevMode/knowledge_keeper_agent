@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   awaitDocument,
   createStage2Session,
@@ -214,8 +215,9 @@ function Stage1Complete({ sessionId, profile }) {
             </button>
           </div>
           <p className="mt-2 text-xs text-parchment-500">
-            This link is personal to the employee and expires. Keep this page — the
-            completed handover pack appears here when their interview finishes.
+            This link is personal to the employee and expires. You don't need to keep
+            this page open — this handover is on your dashboard, and you'll get an
+            email when the pack is ready.
           </p>
         </>
       )}
@@ -244,6 +246,12 @@ function Stage1Complete({ sessionId, profile }) {
           )}
         </div>
       )}
+
+      <div className="mt-6 text-center">
+        <Link to="/dashboard" className="text-sm text-keeper-500 hover:text-keeper-400 underline underline-offset-2">
+          Back to your dashboard
+        </Link>
+      </div>
     </div>
   )
 }

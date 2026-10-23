@@ -40,9 +40,117 @@ async function request(url, { sessionId, ...options } = {}) {
   return res
 }
 
+// ---- Manager account (magic-link sign-in) ----
+//
+// The account token lives in localStorage so a manager stays signed in across
+// tabs and visits (it expires server-side after ACCOUNT_SESSION_DAYS). It never
+// opens a session by itself: the dashboard exchanges it, per handover, for the
+// same session-scoped manager token the rest of the app already uses.
+const ACCOUNT_KEY = 'kk_account'
+
+export class SignedOutError extends Error {}
+
+export function getAccount() {
+  if (DEMO_MODE) return { token: 'demo', email: 'demo@example.com', expiresAt: null }
+  try {
+    const raw = localStorage.getItem(ACCOUNT_KEY)
+    if (!raw) return null
+    const account = JSON.parse(raw)
+    if (!account?.token || (account.expiresAt && account.expiresAt * 1000 < Date.now())) {
+      localStorage.removeItem(ACCOUNT_KEY)
+      return null
+    }
+    return account
+  } catch {
+    return null
+  }
+}
+
+function saveAccount(account) {
+  try {
+    localStorage.setItem(ACCOUNT_KEY, JSON.stringify(account))
+  } catch {
+    // Private mode etc. — signed in for this page only.
+  }
+}
+
+export function signOut() {
+  try {
+    localStorage.removeItem(ACCOUNT_KEY)
+  } catch {
+    // nothing to clear
+  }
+}
+
+async function accountRequest(url, options = {}) {
+  const account = getAccount()
+  if (!account) throw new SignedOutError('Please sign in')
+  const res = await fetch(`${BASE}${url}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${account.token}`,
+      ...(options.headers || {}),
+    },
+  })
+  if (res.status === 401) {
+    signOut()
+    throw new SignedOutError('Your sign-in has expired. Please sign in again.')
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `Request failed: ${res.status}`)
+  }
+  return res
+}
+
+export async function requestSignInLink(email) {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const detail = Array.isArray(body.detail) ? 'Enter a valid email address' : body.detail
+    throw new Error(detail || `Request failed: ${res.status}`)
+  }
+  return body.message
+}
+
+export async function completeSignIn(linkToken) {
+  const res = await fetch(`${BASE}/auth/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: linkToken }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.detail || 'This sign-in link did not work.')
+  const account = { token: body.account_token, email: body.email, expiresAt: body.expires_at }
+  saveAccount(account)
+  return account
+}
+
+export async function listHandovers() {
+  if (DEMO_MODE) return []
+  const res = await accountRequest('/handovers')
+  return res.json()
+}
+
+/**
+ * Exchange the account token for a manager token for one handover, and keep it
+ * where the Stage 1 page and the completion panel expect to find it.
+ */
+export async function openHandover(stage1SessionId) {
+  const res = await accountRequest(`/handovers/${stage1SessionId}/access`, { method: 'POST' })
+  const data = await res.json()
+  storeToken(data.session_id, data.token)
+  return data
+}
+
 export async function createStage1Session() {
   if (DEMO_MODE) return mock.createStage1Session()
-  const res = await request('/sessions/stage1', { method: 'POST' })
+  const res = await accountRequest('/sessions/stage1', { method: 'POST' })
   const data = await res.json()
   storeToken(data.session_id, data.token)
   return data

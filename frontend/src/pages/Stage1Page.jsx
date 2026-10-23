@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { useParams, useLocation } from 'react-router-dom'
+import { Link, useParams, useLocation } from 'react-router-dom'
+import { getSessionStatus, getToken } from '../api/client'
 import ChatWindow from '../components/ChatWindow'
 import SessionComplete from '../components/SessionComplete'
 import useChat from '../hooks/useChat'
@@ -19,7 +20,9 @@ export default function Stage1Page() {
     sendMessage,
     addAgentMessage,
     setCurrentBlock,
+    resume,
   } = useChat(sessionId)
+  const [loadError, setLoadError] = useState(null)
 
   useEffect(() => {
     if (initialized) return
@@ -29,8 +32,34 @@ export default function Stage1Page() {
     if (greeting) {
       addAgentMessage(greeting)
       setCurrentBlock('business_context')
+      return
     }
-  }, [initialized, location.state, addAgentMessage, setCurrentBlock])
+
+    // Opened from the dashboard (or refreshed): pick up where it left off.
+    if (!getToken(sessionId)) {
+      setLoadError('Open this handover from your dashboard.')
+      return
+    }
+    getSessionStatus(sessionId)
+      .then(resume)
+      .catch((err) => setLoadError(err.message))
+  }, [initialized, location.state, addAgentMessage, setCurrentBlock, resume, sessionId])
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-6">
+        <div className="text-center max-w-sm animate-page-in">
+          <p className="text-sm text-ink-light mb-6">{loadError}</p>
+          <Link
+            to="/dashboard"
+            className="inline-block px-6 py-3 rounded-xl bg-keeper-500 text-white font-medium hover:bg-keeper-400 transition-colors"
+          >
+            Go to your dashboard
+          </Link>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <ChatWindow
