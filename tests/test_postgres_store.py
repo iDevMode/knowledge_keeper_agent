@@ -184,3 +184,60 @@ class TestTheSkipGuardItself:
         with clean_db._pool.connection() as conn:
             version = conn.execute("SELECT version()").fetchone()[0]
         assert "PostgreSQL" in version, f"not a Postgres connection: {version[:60]}"
+
+
+# ---- Schema creation under concurrent startup ----
+
+class TestConcurrentSchemaCreation:
+    """Every worker runs the schema DDL on its first request. On a fresh
+    database, several workers doing that at once raced in Postgres's catalog —
+    UniqueViolation on pg_type, or "deadlock detected" — and the request that
+    lost got a 500. This surfaced as an intermittent failure in
+    test_multi_worker and would hit the first requests after a new deploy.
+    """
+
+    WORKERS = 8
+    ROUNDS = 5
+
+    def _drop_tables(self):
+        import psycopg
+
+        with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+            conn.execute(
+                "DROP TABLE IF EXISTS kk_sessions, kk_session_links, kk_profiles, "
+                "kk_documents, kk_generation_errors CASCADE"
+            )
+
+    def test_many_workers_creating_a_fresh_schema_at_once_all_succeed(self):
+        import psycopg
+
+        from api.postgres_store import apply_schema
+
+        errors = []
+
+        def start_worker(barrier):
+            try:
+                with psycopg.connect(TEST_DATABASE_URL) as conn:
+                    barrier.wait()
+                    apply_schema(conn)
+            except Exception as e:  # recorded, asserted below
+                errors.append(f"{type(e).__name__}: {e}")
+
+        try:
+            for _ in range(self.ROUNDS):
+                self._drop_tables()
+                barrier = threading.Barrier(self.WORKERS)
+                threads = [
+                    threading.Thread(target=start_worker, args=(barrier,))
+                    for _ in range(self.WORKERS)
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=30)
+        finally:
+            # Leave a usable schema for whatever runs next.
+            with psycopg.connect(TEST_DATABASE_URL) as conn:
+                apply_schema(conn)
+
+        assert errors == []

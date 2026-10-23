@@ -77,6 +77,25 @@ CREATE TABLE IF NOT EXISTS kk_generation_errors (
 """
 
 
+# Arbitrary, fixed advisory-lock key that serialises schema creation.
+SCHEMA_LOCK_KEY = 0x6B6B5F736368656D  # "kk_schem"
+
+
+def apply_schema(conn) -> None:
+    """Create or upgrade the tables, one process at a time.
+
+    Every worker runs SCHEMA when its stores are first built, which is on its
+    first request. Under load several workers do that at the same moment, and
+    concurrent DDL against the same tables deadlocked in Postgres ("deadlock
+    detected ... AccessExclusiveLock"), failing one of those first requests
+    with a 500. A transaction-scoped advisory lock makes them queue instead;
+    after the first, each run is a cheap no-op.
+    """
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
+        conn.execute(SCHEMA)
+
+
 _shared_pool: Optional[ConnectionPool] = None
 _pool_guard = threading.Lock()
 
@@ -135,7 +154,7 @@ class PostgresSessionStore:
 
     def ensure_schema(self) -> None:
         with self._pool.connection() as conn:
-            conn.execute(SCHEMA)
+            apply_schema(conn)
 
     # -- sessions --------------------------------------------------------
 
@@ -319,7 +338,7 @@ class PostgresDocumentStore:
         self._owns_pool = pool is None and bool(conninfo)
         self._pool = _pool_for(conninfo, pool, settings.db_pool_size)
         with self._pool.connection() as conn:
-            conn.execute(SCHEMA)
+            apply_schema(conn)
 
     def start_job(self, document_id: str, session_id: str) -> None:
         with self._pool.connection() as conn:
