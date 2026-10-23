@@ -96,6 +96,45 @@ def apply_schema(conn) -> None:
         conn.execute(SCHEMA)
 
 
+# A separate key from SCHEMA_LOCK_KEY: see setup_checkpointer.
+CHECKPOINTER_LOCK_KEY = 0x6B6B5F636B707400  # "kk_ckpt"
+
+
+def setup_checkpointer(saver: Any, pool: ConnectionPool, timeout: float = 120.0) -> None:
+    """Run LangGraph's PostgresSaver.setup() one process at a time.
+
+    setup() applies the checkpointer's own table migrations. On a fresh
+    database, several workers running it together collide in the catalog
+    (DuplicateObject / UniqueViolation), and the worker that loses fails its
+    first request with a 500 — the same race as apply_schema, in tables we do
+    not own.
+
+    The lock is taken with pg_try_advisory_lock in a polling loop, not the
+    blocking form. Those migrations include CREATE INDEX CONCURRENTLY, which
+    waits for every transaction in progress — including a worker blocked inside
+    pg_advisory_lock, which is itself waiting for the holder to finish. That
+    deadlock is invisible to Postgres and simply hangs. Polling means a waiter
+    holds no open statement between attempts. A key of its own keeps it clear
+    of apply_schema, whose lock is held inside a transaction.
+    """
+    deadline = time.time() + timeout
+    with pool.connection() as conn:
+        while True:
+            row = conn.execute(
+                "SELECT pg_try_advisory_lock(%s) AS locked", (CHECKPOINTER_LOCK_KEY,)
+            ).fetchone()
+            locked = row["locked"] if isinstance(row, dict) else row[0]
+            if locked:
+                break
+            if time.time() > deadline:
+                raise TimeoutError("timed out waiting for another worker's checkpointer setup")
+            time.sleep(0.1)
+        try:
+            saver.setup()
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (CHECKPOINTER_LOCK_KEY,))
+
+
 _shared_pool: Optional[ConnectionPool] = None
 _pool_guard = threading.Lock()
 

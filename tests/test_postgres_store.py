@@ -241,3 +241,59 @@ class TestConcurrentSchemaCreation:
                 apply_schema(conn)
 
         assert errors == []
+
+
+class TestConcurrentCheckpointerSetup:
+    """LangGraph's PostgresSaver.setup() runs its own migrations. On a fresh
+    database, workers running it together failed with DuplicateObject /
+    UniqueViolation (70 of 80 attempts in a local reproduction) — the cause of
+    test_multi_worker's intermittent 500 on CI, where every run starts empty.
+    """
+
+    WORKERS = 8
+    ROUNDS = 5
+
+    def _drop_checkpoint_tables(self):
+        import psycopg
+
+        with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+            conn.execute(
+                "DROP TABLE IF EXISTS checkpoints, checkpoint_blobs, "
+                "checkpoint_writes, checkpoint_migrations CASCADE"
+            )
+
+    def test_many_workers_setting_up_at_once_all_succeed(self):
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        from api.postgres_store import setup_checkpointer
+
+        errors = []
+
+        def start_worker(barrier):
+            pool = ConnectionPool(
+                TEST_DATABASE_URL, min_size=1, max_size=2, open=True,
+                kwargs={"autocommit": True, "row_factory": dict_row},
+            )
+            try:
+                barrier.wait()
+                setup_checkpointer(PostgresSaver(pool), pool)
+            except Exception as e:  # recorded, asserted below
+                errors.append(f"{type(e).__name__}: {e}")
+            finally:
+                pool.close()
+
+        for _ in range(self.ROUNDS):
+            self._drop_checkpoint_tables()
+            barrier = threading.Barrier(self.WORKERS)
+            threads = [
+                threading.Thread(target=start_worker, args=(barrier,))
+                for _ in range(self.WORKERS)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+
+        assert errors == []
