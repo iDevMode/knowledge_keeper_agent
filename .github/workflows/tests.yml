@@ -84,8 +84,22 @@ jobs:
 
       - name: Run tests
         shell: bash
-        # -rs lists every skip with its reason, which the next step checks.
-        run: pytest -q -rs | tee result.txt
+        # -rs lists every skip with its reason, which the next step checks;
+        # -rfE keeps failures and errors in the summary for the step after.
+        run: pytest -q -rfEs | tee result.txt
+
+      # Job logs live in blob storage that some tooling cannot reach, so the
+      # names of failing tests are also surfaced as annotations, which show on
+      # the PR and are readable through the checks API.
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f result.txt ]; then
+            grep -E "^(FAILED|ERROR) " result.txt | head -30 | while IFS= read -r line; do
+              echo "::error title=Test failure::${line}"
+            done
+          fi
 
       - name: Nothing may skip in this job
         shell: bash
@@ -150,7 +164,20 @@ jobs:
         shell: bash
         # The in-memory fallback must keep working: it is what local runs and
         # ENVIRONMENT=development use.
-        run: pytest -q -rs | tee result.txt
+        run: pytest -q -rfEs | tee result.txt
+
+      # Job logs live in blob storage that some tooling cannot reach, so the
+      # names of failing tests are also surfaced as annotations, which show on
+      # the PR and are readable through the checks API.
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f result.txt ]; then
+            grep -E "^(FAILED|ERROR) " result.txt | head -30 | while IFS= read -r line; do
+              echo "::error title=Test failure::${line}"
+            done
+          fi
 
       - name: Every skip must be explained by the missing database
         shell: bash
