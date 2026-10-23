@@ -116,6 +116,16 @@ class Settings(BaseSettings):
                 f"exceeds SESSION_TTL_HOURS ({self.session_ttl_hours}) — the employee "
                 f"link would outlive the session behind it"
             )
+        if self.default_output_format == "pdf":
+            # Imported here so settings stays importable without the exporter.
+            from output.exporters.pdf_exporter import WEASYPRINT_AVAILABLE
+
+            if not WEASYPRINT_AVAILABLE:
+                print(
+                    "[WARN] DEFAULT_OUTPUT_FORMAT is pdf but WeasyPrint cannot load — "
+                    "handover packs will be served as DOCX",
+                    file=sys.stderr,
+                )
         if errors:
             for err in errors:
                 print(f"[FATAL] {err}", file=sys.stderr)
