@@ -91,6 +91,13 @@ export async function getSessionStatus(sessionId, authSessionId = sessionId) {
  * authorises the document — the MANAGER's, since the document endpoints are
  * manager-only.
  */
+/** One status read for a document, including whether it was emailed. */
+export async function getDocumentStatus(documentId, authSessionId) {
+  if (DEMO_MODE) return { document_id: documentId, status: 'complete', delivery: null }
+  const res = await request(`/documents/${documentId}/status`, { sessionId: authSessionId })
+  return res.json()
+}
+
 export async function awaitDocument(documentId, authSessionId) {
   if (DEMO_MODE) return mock.awaitDocument?.(documentId) ?? { document_id: documentId }
 

@@ -2,11 +2,36 @@ import { useEffect, useRef, useState } from 'react'
 import {
   awaitDocument,
   createStage2Session,
+  getDocumentStatus,
   getDownloadUrl,
   getSessionStatus,
 } from '../api/client'
 
 const POLL_INTERVAL_MS = 5000
+// Emailing happens just after the pack is stored, so the outcome trails the
+// download link by a few seconds. Stop asking after about a minute.
+const DELIVERY_POLL_MS = 2500
+const DELIVERY_POLL_LIMIT = 24
+
+function DeliveryNote({ delivery }) {
+  if (!delivery) return null
+  if (delivery.status === 'sent') {
+    const n = delivery.recipients.length
+    return (
+      <p className="mt-3 text-xs text-parchment-500 text-center">
+        Emailed to {delivery.recipients.join(', ')}
+        {n > 1 ? ` (${n} recipients)` : ''}.
+      </p>
+    )
+  }
+  const reason = delivery.error || 'Unknown reason'
+  return (
+    <p className={`mt-3 text-xs text-center ${delivery.status === 'failed' ? 'text-red-600' : 'text-parchment-500'}`}>
+      {delivery.status === 'failed' ? 'The pack could not be emailed: ' : 'Not emailed: '}
+      {reason}. Download it above to share it.
+    </p>
+  )
+}
 
 function CheckmarkIcon() {
   return (
@@ -41,6 +66,8 @@ function Stage1Complete({ sessionId, profile }) {
   const [employeeComplete, setEmployeeComplete] = useState(false)
   const [downloadUrl, setDownloadUrl] = useState(null)
   const [documentError, setDocumentError] = useState(null)
+  const [documentId, setDocumentId] = useState(null)
+  const [delivery, setDelivery] = useState(null)
 
   const createdRef = useRef(false)
 
@@ -85,6 +112,7 @@ function Stage1Complete({ sessionId, profile }) {
         if (status.document_id) {
           const doc = await awaitDocument(status.document_id, sessionId)
           if (cancelled) return
+          setDocumentId(doc.document_id)
           setDownloadUrl(getDownloadUrl(doc.document_id, sessionId))
           return
         }
@@ -100,6 +128,38 @@ function Stage1Complete({ sessionId, profile }) {
       clearTimeout(timer)
     }
   }, [stage2SessionId, sessionId, downloadUrl])
+
+  // Once the pack exists, find out whether it was emailed.
+  useEffect(() => {
+    if (!documentId || delivery) return
+
+    let cancelled = false
+    let timer
+    let attempts = 0
+
+    async function poll() {
+      attempts += 1
+      try {
+        const status = await getDocumentStatus(documentId, sessionId)
+        if (cancelled) return
+        if (status.delivery) {
+          setDelivery(status.delivery)
+          return
+        }
+      } catch {
+        // The download still works; delivery status is a nicety.
+      }
+      if (!cancelled && attempts < DELIVERY_POLL_LIMIT) {
+        timer = setTimeout(poll, DELIVERY_POLL_MS)
+      }
+    }
+
+    poll()
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [documentId, sessionId, delivery])
 
   function copyLink() {
     if (!link) return
@@ -164,12 +224,15 @@ function Stage1Complete({ sessionId, profile }) {
       {link && (
         <div className="mt-6 pt-6 border-t border-parchment-200">
           {downloadUrl ? (
-            <a
-              href={downloadUrl}
-              className="block w-full py-3 rounded-xl bg-keeper-500 text-white font-medium text-center hover:bg-keeper-400 transition-colors"
-            >
-              Download Handover Pack
-            </a>
+            <>
+              <a
+                href={downloadUrl}
+                className="block w-full py-3 rounded-xl bg-keeper-500 text-white font-medium text-center hover:bg-keeper-400 transition-colors"
+              >
+                Download Handover Pack
+              </a>
+              <DeliveryNote delivery={delivery} />
+            </>
           ) : documentError ? (
             <p className="text-sm text-red-600 text-center">{documentError}</p>
           ) : (
