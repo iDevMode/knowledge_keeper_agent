@@ -92,7 +92,7 @@ BLOCK_QUESTIONS = {
     ],
     "output_preferences": [
         "Ask where they want the final handover document to live — examples: Notion, Confluence, SharePoint, Google Drive, or a Word/PDF document.",
-        "Ask who should receive the completed output — the direct manager, HR, the incoming hire, or a combination.",
+        "Ask who should receive the completed handover pack — the direct manager, HR, the incoming hire, or a combination — and the email address for each, explaining that the pack will be emailed to them automatically when it is ready.",
         "Ask whether any sections should be kept confidential — for example salary context, performance history, or sensitive client notes.",
         'Ask whether they have an existing handover template they have used before. If yes, ask them to describe its structure briefly. If no, confirm you will generate a best-practice structure.',
     ],
@@ -131,6 +131,14 @@ Map the manager's numbered selection to these values (1 -> client_stakeholder_re
 2 -> internal_processes_workflows, 3 -> technical_systems_tools, 4 -> decision_making_logic,
 5 -> team_dynamics_management, 6 -> supplier_vendor_relationships, 7 -> regulatory_compliance,
 8 -> undocumented_workarounds, 9 -> strategic_context).
+
+## RECIPIENT EMAIL ADDRESSES
+
+recipients holds who should receive the pack (e.g. "HR Manager", "Incoming hire").
+recipient_emails holds every email address the manager gave for those recipients, copied
+exactly. The handover pack is emailed to these addresses, so NEVER invent, guess or
+complete an address — if the manager did not give one, leave it out. Use an empty list
+if no addresses were given.
 
 Return the profile as a valid JSON object matching the RoleIntelligenceProfile schema exactly.
 """
@@ -182,6 +190,7 @@ Supporting: {supporting_categories}
 **Output Preferences**
 - Destination: {document_destination}
 - Recipients: {recipients}
+- Email the pack to: {recipient_emails}
 - Confidential Sections: {confidential_sections}
 - Existing Template: {existing_template}
 

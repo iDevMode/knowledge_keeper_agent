@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     # Output
     default_output_format: str = "docx"
 
+    # Email (SendGrid)
+    # Without an API key, emails are logged (recipient count and subject only)
+    # instead of sent — fine for development, a warning in production.
+    sendgrid_api_key: str = ""
+    # Must be an address on a domain verified in SendGrid (Sender Authentication).
+    email_from_address: str = ""
+    email_from_name: str = "KnowledgeKeeper"
+    # Public origin of the app, used to build links inside emails,
+    # e.g. https://knowledgekeeper.nukode.co.uk
+    public_base_url: str = "http://localhost:3000"
+
     # API
     api_secret_key: str = ""
     allowed_origins: str = "http://localhost:3000"
@@ -116,6 +127,17 @@ class Settings(BaseSettings):
                 f"exceeds SESSION_TTL_HOURS ({self.session_ttl_hours}) — the employee "
                 f"link would outlive the session behind it"
             )
+        if self.environment != "development":
+            if not self.sendgrid_api_key:
+                print(
+                    "[WARN] SENDGRID_API_KEY is not set — handover packs will not be emailed",
+                    file=sys.stderr,
+                )
+            elif not self.email_from_address:
+                errors.append(
+                    "SENDGRID_API_KEY is set but EMAIL_FROM_ADDRESS is not — SendGrid "
+                    "rejects mail without a verified sender"
+                )
         if errors:
             for err in errors:
                 print(f"[FATAL] {err}", file=sys.stderr)
