@@ -13,6 +13,10 @@ It deliberately mirrors who holds what in production:
   * /generate and the document endpoints attach a MANAGER token, because that
     is who is allowed to invoke them.
 
+Starting a handover needs a signed-in manager, so the client also carries an
+ACCOUNT token for a test manager and attaches it to session creation and the
+account/dashboard endpoints.
+
 Tests that assert on the auth boundary itself should use a bare TestClient and
 set headers explicitly — see tests/test_auth.py.
 """
@@ -22,10 +26,18 @@ from typing import Dict, List, Optional
 
 from fastapi.testclient import TestClient
 
-from api.auth import EMPLOYEE, MANAGER, Scope, issue_token
+from api.auth import ACCOUNT, EMPLOYEE, MANAGER, Scope, issue_token
 
 _SESSION_URL = re.compile(r"/api/sessions/([^/?]+)")
 _DOCUMENT_URL = re.compile(r"/api/documents/")
+_ACCOUNT_URL = re.compile(r"/api/(handovers|account)(/|$)")
+
+TEST_MANAGER_ID = "test-manager"
+
+
+def account_token(manager_id: str = TEST_MANAGER_ID) -> str:
+    """A signed-in manager, as if they had used a magic link."""
+    return issue_token(manager_id, ACCOUNT)
 
 # Session-creation endpoints: the path segment after /sessions/ is a literal,
 # not a session id.
@@ -33,10 +45,11 @@ _CREATE_PATHS = {"stage1", "stage2"}
 
 
 class AuthedTestClient(TestClient):
-    def __init__(self, app):
+    def __init__(self, app, manager_id: str = TEST_MANAGER_ID):
         super().__init__(app)
         self._tokens: Dict[str, str] = {}
         self._manager_tokens: List[str] = []
+        self.account_token = account_token(manager_id)
 
     # -- token management ------------------------------------------------
 
@@ -65,6 +78,8 @@ class AuthedTestClient(TestClient):
     # -- request plumbing ------------------------------------------------
 
     def _select_token(self, url: str) -> Optional[str]:
+        if _ACCOUNT_URL.search(url):
+            return self.account_token
         if _DOCUMENT_URL.search(url):
             return self.manager_token
 
@@ -75,8 +90,8 @@ class AuthedTestClient(TestClient):
         session_id = match.group(1)
         if session_id in _CREATE_PATHS:
             # POST /sessions/stage2 authorises against the Stage 1 id in the
-            # body; POST /sessions/stage1 needs nothing.
-            return self.manager_token if session_id == "stage2" else None
+            # body; POST /sessions/stage1 needs a signed-in manager.
+            return self.manager_token if session_id == "stage2" else self.account_token
 
         if url.rstrip("/").endswith("/generate"):
             return self.manager_token or self._tokens.get(session_id)

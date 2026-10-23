@@ -117,13 +117,16 @@ Cross-referencing between sections (e.g. a risk flag in Section 2 referencing a 
 The gap between Stage 1 and Stage 2 could be hours or days (the manager completes Stage 1, then shares the link with the employee), so the state has to outlive the process — a redeploy in that window must not destroy an in-flight interview. Redis was the original plan, but LangGraph's `RedisSaver.setup()` issues `FT._LIST`, a RediSearch command: it requires Redis Stack, not the plain Redis addon a managed platform gives you, and it fails at startup with `ResponseError: unknown command 'ft._list'`. Postgres already had to be in the stack for durable documents and cross-worker locking, so everything now lives there: sessions and profiles (`kk_sessions`, `kk_profiles`, `kk_session_links`), LangGraph checkpoints (`PostgresSaver`), generated documents as bytes (`kk_documents`), and `pg_advisory_lock` to serialise a session's graph run across workers. TTL is enforced by an expiry sweep rather than by the store. When `DATABASE_URL` is unset the app falls back to in-memory equivalents — fine for tests and local runs, fatal at startup outside development. See `api/postgres_store.py`.
 
 **Why stage-scoped signed tokens rather than unguessable session URLs?**
-The Stage 2 link is *designed to be forwarded to the departing employee*, so a capability-URL model makes the link itself the credential — and it was the manager's session id. Anyone holding it could read and write the manager's Stage 1 interview, and could generate and download the handover pack including the Risk Summary written about them. Tokens are HMAC-signed with `API_SECRET_KEY`, carry `{session_id, scope, exp}`, and come in two scopes: `manager` (authorises its own session and the linked one, plus generate/download) and `employee` (that one session only, never the document). See `api/auth.py`.
+The Stage 2 link is *designed to be forwarded to the departing employee*, so a capability-URL model makes the link itself the credential — and it was the manager's session id. Anyone holding it could read and write the manager's Stage 1 interview, and could generate and download the handover pack including the Risk Summary written about them. Tokens are HMAC-signed with `API_SECRET_KEY`, carry `{session_id, scope, exp}`, and come in three scopes: `manager` (authorises its own session and the linked one, plus generate/download), `employee` (that one session only, never the document) and `account` (a signed-in manager; opens no session by itself — see below). See `api/auth.py`.
 
 **Why does the manager create the employee's session?**
 Minting an employee token requires proving you are the manager. The employee's browser therefore no longer creates the Stage 2 session — it opens a link the manager generated, carrying a token scoped to that session alone.
 
 **How is the handover pack emailed?**
 Through SendGrid (`api/mailer.py`, `api/delivery.py`). The pack produced automatically when Stage 2 completes is emailed as an attachment to `recipient_emails` from the confirmed profile; a manager-triggered regenerate only emails if `send_email` is set. The manager sees those exact addresses in the profile review before confirming, because the pack carries a Risk Summary about a named employee. Each recipient gets their own SendGrid personalization so nobody sees who else received it, and click tracking is off. Delivery runs after the document is stored and never fails generation — the outcome (sent / skipped / failed, with a reason) is recorded on the document and shown to the manager only. Without `SENDGRID_API_KEY` the app logs instead of sending. Tests never send email: `tests/conftest.py` swaps in an in-memory outbox.
+
+**How do managers sign in, and how does that fit the token model?**
+By emailed magic link (`api/accounts.py`, `api/account_routes.py`). `POST /api/auth/login` emails a one-time link (15 minutes, single use, stored only as a SHA-256 hash, token in the URL fragment so it never reaches server logs); the response is identical whether or not anything was sent, and requests are capped per address. `POST /api/auth/verify` returns an `account` token (30 days) bound to the manager id, not a session — so it opens nothing by itself. Starting a handover requires it, and records the Stage 1 session against the manager in `kk_handovers`. The dashboard (`GET /api/handovers`) lists them with a derived status, and `POST /api/handovers/{id}/access` exchanges ownership for the ordinary `manager` token, so every existing endpoint and permission works unchanged. A non-owner gets 404, not 403. `kk_handovers` holds ids, a title and a timestamp only, so a handover still lists (as expired) after its session is swept. The owner is emailed when the pack is ready or fails. Without SendGrid in development, the sign-in link is logged instead; production refuses to start without email or with a localhost `PUBLIC_BASE_URL`.
 
 ---
 
@@ -136,8 +139,11 @@ python -m agents.stage1_business_interview.graph --mode cli
 # Run Stage 2 with a fixture profile (CLI for testing)
 python -m agents.stage2_employee_interview.graph --mode cli --profile tests/fixtures/sample_role_profiles.json --profile-id relationship_heavy
 
-# Generate a test document from fixture transcripts
-python -m agents.stage3_document_generation.generator --stage1 tests/fixtures/stage1_transcript.json --stage2 tests/fixtures/stage2_transcript.json
+# Generate a test document from fixture Stage 2 results (mocked LLM)
+python -m scripts.run_mock_generation [profile_id]
+
+# Sign in locally without SendGrid: request a link on the home page, then open
+# the "DEVELOPMENT sign-in link" printed in the server log.
 ```
 
 ---

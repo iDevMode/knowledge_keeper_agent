@@ -142,7 +142,12 @@ class TestThroughTheAPI:
     """The mapping is only worth anything if it reaches the response body."""
 
     def _session(self, client):
-        res = client.post("/api/sessions/stage1")
+        from tests.api_client import account_token
+
+        res = client.post(
+            "/api/sessions/stage1",
+            headers={"Authorization": f"Bearer {account_token()}"},
+        )
         assert res.status_code == 200
         return res.json()["session_id"], res.json()["token"]
 

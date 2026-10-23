@@ -70,7 +70,18 @@ export default function useChat(sessionId) {
     [sessionId, loading, sessionComplete]
   )
 
+  /** Restore a session opened from the dashboard rather than just created. */
+  const resume = useCallback((status) => {
+    if (status.last_agent_message) {
+      setMessages([{ role: 'agent', content: status.last_agent_message }])
+    }
+    if (status.current_block) setCurrentBlock(status.current_block)
+    if (status.session_complete) setSessionComplete(true)
+    if (status.profile) setProfile(status.profile)
+  }, [])
+
   return {
+    resume,
     messages,
     loading,
     sessionComplete,

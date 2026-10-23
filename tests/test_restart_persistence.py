@@ -69,17 +69,19 @@ def _bearer(token: str) -> dict:
 
 def _restart() -> TestClient:
     """Throw away every piece of process state, as a redeploy does."""
+    import api.accounts as acct_mod
     import api.document_store as doc_mod
     import api.routes as routes_mod
     import api.session_manager as sm_mod
 
-    for module in (sm_mod, doc_mod):
+    for module in (sm_mod, doc_mod, acct_mod):
         store = module._store
         if store is not None and hasattr(store, "close"):
             store.close()
 
     sm_mod.reset_session_store()
     doc_mod.reset_document_store()
+    acct_mod.reset_account_store()
     routes_mod.reset_checkpointer()
     routes_mod.reset_session_locks()
     routes_mod._registry = routes_mod.GraphRegistry()
@@ -89,7 +91,13 @@ def _restart() -> TestClient:
 
         reset_shared_pool()
 
-    return TestClient(routes_mod.app)
+    # A signed-in manager, so starting a handover works. Calls that pass their
+    # own Authorization header override this one.
+    from tests.api_client import account_token
+
+    return TestClient(
+        routes_mod.app, headers={"Authorization": f"Bearer {account_token()}"}
+    )
 
 
 @pytest.fixture

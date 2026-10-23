@@ -205,7 +205,8 @@ class TestConcurrentSchemaCreation:
         with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
             conn.execute(
                 "DROP TABLE IF EXISTS kk_sessions, kk_session_links, kk_profiles, "
-                "kk_documents, kk_generation_errors CASCADE"
+                "kk_documents, kk_generation_errors, kk_managers, kk_login_tokens, "
+                "kk_handovers CASCADE"
             )
 
     def test_many_workers_creating_a_fresh_schema_at_once_all_succeed(self):
