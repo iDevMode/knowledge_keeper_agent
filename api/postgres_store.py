@@ -493,6 +493,15 @@ class PostgresDocumentStore:
         self._pool = _pool_for(conninfo, pool, settings.db_pool_size)
         with self._pool.connection() as conn:
             apply_schema(conn)
+            # Packs finished before retention existed have no expires_at and
+            # would otherwise be swept on the old 72-hour rule. Give them the
+            # retention period from when they were made. Idempotent: matches
+            # nothing once every finished pack has a date.
+            conn.execute(
+                "UPDATE kk_documents SET expires_at = created_at + %s "
+                "WHERE status = %s AND expires_at IS NULL",
+                (self._retention_seconds, COMPLETE),
+            )
 
     def start_job(self, document_id: str, session_id: str) -> None:
         with self._pool.connection() as conn:

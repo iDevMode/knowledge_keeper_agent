@@ -265,6 +265,31 @@ class TestExpiry:
         assert store.sweep_expired() == 0
 
 
+@requires_postgres
+class TestPacksFromBeforeRetention:
+    def test_get_the_retention_period_from_when_they_were_made(self):
+        """Without this they would be swept on the old 72-hour rule."""
+        import psycopg
+
+        made = time.time() - 3600
+        _make_postgres_store(72)  # clean tables
+        with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO kk_documents (document_id, session_id, status, filename, "
+                "media_type, content, created_at) VALUES ('legacy', 's1', 'complete', "
+                "'p.docx', 'x', 'PACK', %s), ('stuck', 's2', 'generating', NULL, NULL, NULL, %s)",
+                (made, made),
+            )
+        from api.postgres_store import PostgresDocumentStore
+
+        store = PostgresDocumentStore(conninfo=TEST_DATABASE_URL, retention_days=365)
+        try:
+            assert abs(store.get_job("legacy")["expires_at"] - (made + 365 * 86400)) < 1
+            assert store.get_job("stuck")["expires_at"] is None
+        finally:
+            store.close()
+
+
 class TestSupersede:
     def test_a_finished_pack_replaces_earlier_ones(self, store):
         store.start_job("v1", "session-1")
