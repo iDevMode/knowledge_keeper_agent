@@ -26,10 +26,12 @@ DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PACK = b"RISK SUMMARY: sole owner of the reconciliation process"
 
 
-def _make_postgres_store(ttl_hours):
+def _make_postgres_store(ttl_hours, retention_days=None):
     from api.postgres_store import PostgresDocumentStore
 
-    store = PostgresDocumentStore(conninfo=TEST_DATABASE_URL, ttl_hours=ttl_hours)
+    store = PostgresDocumentStore(
+        conninfo=TEST_DATABASE_URL, ttl_hours=ttl_hours, retention_days=retention_days
+    )
     with store._pool.connection() as conn:
         conn.execute("TRUNCATE kk_documents, kk_generation_errors")
     return store
@@ -44,11 +46,11 @@ def _make_postgres_store(ttl_hours):
 def store_factory(request):
     created = []
 
-    def make(ttl_hours=72):
+    def make(ttl_hours=72, retention_days=None):
         store = (
-            InMemoryDocumentStore(ttl_hours=ttl_hours)
+            InMemoryDocumentStore(ttl_hours=ttl_hours, retention_days=retention_days)
             if request.param == "memory"
-            else _make_postgres_store(ttl_hours)
+            else _make_postgres_store(ttl_hours, retention_days)
         )
         created.append(store)
         return store
@@ -197,10 +199,33 @@ class TestGenerationErrors:
 
 
 class TestExpiry:
-    TINY_TTL_HOURS = 1 / 3600  # one second
+    """Retention: a finished pack is kept for the retention period from
+    completion; an unfinished or failed job only as long as an interview."""
 
-    def test_expired_documents_are_swept(self, store_factory):
-        store = store_factory(ttl_hours=self.TINY_TTL_HOURS)
+    TINY_TTL_HOURS = 1 / 3600  # one second
+    TINY_RETENTION_DAYS = 1 / 86400  # one second
+
+    def test_a_finished_pack_outlives_the_interview_lifetime(self, store_factory):
+        """It used to be swept with the interview after 72 hours."""
+        store = store_factory(ttl_hours=self.TINY_TTL_HOURS, retention_days=365)
+        store.start_job("pack", "session-1")
+        store.complete_job("pack", "pack.docx", DOCX, PACK)
+        time.sleep(1.2)
+
+        assert store.sweep_expired() == 0
+        assert store.get_content("pack") == ("pack.docx", DOCX, PACK)
+
+    def test_a_finished_pack_reports_when_it_will_be_deleted(self, store_factory):
+        store = store_factory(retention_days=365)
+        store.start_job("pack", "session-1")
+        assert store.get_job("pack")["expires_at"] is None
+        store.complete_job("pack", "pack.docx", DOCX, PACK)
+
+        expires_at = store.get_job("pack")["expires_at"]
+        assert abs(expires_at - (time.time() + 365 * 86400)) < 60
+
+    def test_a_finished_pack_is_deleted_after_the_retention_period(self, store_factory):
+        store = store_factory(retention_days=self.TINY_RETENTION_DAYS)
         store.start_job("doomed", "session-1")
         store.complete_job("doomed", "pack.docx", DOCX, PACK)
         time.sleep(1.2)
@@ -209,7 +234,16 @@ class TestExpiry:
         assert store.get_job("doomed") is None
         assert store.get_content("doomed") is None
 
-    def test_fresh_documents_survive_the_sweep(self, store_factory):
+    def test_unfinished_jobs_expire_with_the_interview(self, store_factory):
+        store = store_factory(ttl_hours=self.TINY_TTL_HOURS, retention_days=365)
+        store.start_job("stuck", "session-1")
+        store.start_job("broken", "session-2")
+        store.fail_job("broken", "Stage 3 failed")
+        time.sleep(1.2)
+
+        assert store.sweep_expired() == 2
+
+    def test_fresh_unfinished_jobs_survive_the_sweep(self, store_factory):
         store = store_factory(ttl_hours=self.TINY_TTL_HOURS)
         store.start_job("old", "session-1")
         time.sleep(1.2)
@@ -229,6 +263,81 @@ class TestExpiry:
     def test_sweep_with_nothing_expired_returns_zero(self, store):
         store.start_job("doc-1", "session-1")
         assert store.sweep_expired() == 0
+
+
+class TestSupersede:
+    def test_a_finished_pack_replaces_earlier_ones(self, store):
+        store.start_job("v1", "session-1")
+        store.complete_job("v1", "v1.docx", DOCX, PACK)
+        time.sleep(0.01)
+        store.start_job("v2", "session-1")
+        # Until v2 finishes, v1 is still there to download.
+        assert store.get_content("v1") is not None
+
+        store.complete_job("v2", "v2.pdf", "application/pdf", b"PDF")
+
+        assert store.get_job("v1") is None
+        assert store.document_for_session("session-1") == "v2"
+        assert store.get_content("v2") == ("v2.pdf", "application/pdf", b"PDF")
+
+    def test_a_failed_regeneration_keeps_the_previous_pack(self, store):
+        store.start_job("v1", "session-1")
+        store.complete_job("v1", "v1.docx", DOCX, PACK)
+        time.sleep(0.01)
+        store.start_job("v2", "session-1")
+        store.fail_job("v2", "Stage 3 failed")
+
+        assert store.get_content("v1") == ("v1.docx", DOCX, PACK)
+
+    def test_other_sessions_are_untouched(self, store):
+        store.start_job("mine", "session-1")
+        store.start_job("theirs", "session-2")
+        store.complete_job("theirs", "t.docx", DOCX, PACK)
+        store.complete_job("mine", "m.docx", DOCX, PACK)
+
+        assert store.get_content("theirs") is not None
+
+
+class TestCompletedDocument:
+    def test_none_until_a_pack_finishes(self, store):
+        store.start_job("v1", "session-1")
+        assert store.completed_document_for_session("session-1") is None
+        store.complete_job("v1", "v1.docx", DOCX, PACK)
+        assert store.completed_document_for_session("session-1") == "v1"
+
+    def test_a_running_or_failed_regeneration_does_not_hide_the_pack(self, store):
+        store.start_job("v1", "session-1")
+        store.complete_job("v1", "v1.docx", DOCX, PACK)
+        time.sleep(0.01)
+        store.start_job("v2", "session-1")
+        assert store.document_for_session("session-1") == "v2"
+        assert store.completed_document_for_session("session-1") == "v1"
+        store.fail_job("v2", "boom")
+        assert store.completed_document_for_session("session-1") == "v1"
+
+
+class TestDeleteForSession:
+    def test_deletes_every_document_and_error_for_the_session(self, store):
+        store.start_job("v1", "session-1")
+        store.complete_job("v1", "v1.docx", DOCX, PACK)
+        time.sleep(0.01)
+        store.start_job("v2", "session-1")
+        store.set_generation_error("session-1", "boom")
+
+        assert store.delete_for_session("session-1") == 2
+        assert store.get_job("v1") is None
+        assert store.get_job("v2") is None
+        assert store.document_for_session("session-1") is None
+        assert store.get_generation_error("session-1") is None
+
+    def test_leaves_other_sessions_alone(self, store):
+        store.start_job("mine", "session-1")
+        store.start_job("theirs", "session-2")
+        store.delete_for_session("session-1")
+        assert store.get_job("theirs") is not None
+
+    def test_unknown_session_deletes_nothing(self, store):
+        assert store.delete_for_session("nobody") == 0
 
 
 class TestProtocolConformance:

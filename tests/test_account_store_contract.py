@@ -143,3 +143,61 @@ class TestHandovers:
         store.add_handover("s1", "m1")
         store.set_handover_title("s1", "Senior Operations Coordinator")
         assert store.list_handovers("m1")[0]["title"] == "Senior Operations Coordinator"
+
+
+class TestHandoverRetention:
+    def test_a_new_handover_is_kept_for_the_interview_window(self, store):
+        from api.accounts import default_handover_window
+
+        store.add_handover("s1", "m1")
+        record = store.get_handover("s1")
+        assert abs(record["retain_until"] - (time.time() + default_handover_window())) < 60
+        assert record["manager_id"] == "m1"
+        assert record["stage2_session_id"] is None
+
+    def test_the_employee_session_is_recorded(self, store):
+        store.add_handover("s1", "m1")
+        store.set_handover_stage2("s1", "s2")
+        assert store.get_handover("s1")["stage2_session_id"] == "s2"
+        assert store.list_handovers("m1")[0]["stage2_session_id"] == "s2"
+
+    def test_extending_never_shortens(self, store):
+        store.add_handover("s1", "m1")
+        before = store.get_handover("s1")["retain_until"]
+        store.extend_handover("s1", time.time())
+        assert store.get_handover("s1")["retain_until"] == before
+        store.extend_handover("s1", before + 1000)
+        assert store.get_handover("s1")["retain_until"] == before + 1000
+
+    def test_expired_handovers_are_reported(self, store):
+        store.add_handover("old", "m1", retain_until=time.time() - 1)
+        store.add_handover("live", "m1")
+        assert [h["stage1_session_id"] for h in store.expired_handovers()] == ["old"]
+
+    def test_delete_removes_the_record(self, store):
+        store.add_handover("s1", "m1")
+        store.delete_handover("s1")
+        assert store.get_handover("s1") is None
+        assert store.owner_of_handover("s1") is None
+        assert store.list_handovers("m1") == []
+
+    def test_list_carries_the_retention_date(self, store):
+        store.add_handover("s1", "m1")
+        assert store.list_handovers("m1")[0]["retain_until"] > time.time()
+
+    @requires_postgres
+    def test_rows_from_before_retention_get_the_default_window(self):
+        """Handovers created before the column existed have no retain_until."""
+        store = _make_postgres_store()
+        try:
+            with store._pool.connection() as conn:
+                conn.execute(
+                    "INSERT INTO kk_handovers (stage1_session_id, manager_id, created_at) "
+                    "VALUES ('legacy', 'm1', %s)",
+                    (time.time() - 10,),
+                )
+            record = store.get_handover("legacy")
+            assert record["retain_until"] > time.time()
+            assert store.expired_handovers() == []
+        finally:
+            store.close()

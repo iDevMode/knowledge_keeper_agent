@@ -42,17 +42,22 @@ class DocumentStore(Protocol):
     def get_content(self, document_id: str) -> Optional[tuple[str, str, bytes]]: ...
     def owner_of(self, document_id: str) -> Optional[str]: ...
     def document_for_session(self, session_id: str) -> Optional[str]: ...
+    def completed_document_for_session(self, session_id: str) -> Optional[str]: ...
     def set_generation_error(self, session_id: str, message: str) -> None: ...
     def clear_generation_error(self, session_id: str) -> None: ...
     def get_generation_error(self, session_id: str) -> Optional[str]: ...
     def sweep_expired(self) -> int: ...
+    def delete_for_session(self, session_id: str) -> int: ...
 
 
 class InMemoryDocumentStore:
     """Process-local. Everything here dies with the process, by design."""
 
-    def __init__(self, ttl_hours: float | None = None):
+    def __init__(self, ttl_hours: float | None = None, retention_days: float | None = None):
+        # Unfinished and failed jobs live as long as an interview does; a
+        # finished pack is kept for the retention period from completion.
         self._ttl_seconds = (ttl_hours or settings.session_ttl_hours) * 3600
+        self._retention_seconds = (retention_days or settings.document_retention_days) * 86400
         self._documents: Dict[str, Dict[str, Any]] = {}
         self._session_document: Dict[str, str] = {}
         self._generation_errors: Dict[str, str] = {}
@@ -69,6 +74,7 @@ class InMemoryDocumentStore:
                 "content": None,
                 "delivery": None,
                 "created_at": time.time(),
+                "expires_at": None,
             }
             self._session_document[session_id] = document_id
             self._generation_errors.pop(session_id, None)
@@ -82,7 +88,18 @@ class InMemoryDocumentStore:
             record.update(
                 status=COMPLETE, filename=filename, media_type=media_type,
                 content=content, error=None,
+                expires_at=time.time() + self._retention_seconds,
             )
+            # A finished pack supersedes every earlier one for the session:
+            # there is no reason to keep a year of old drafts of the same
+            # Risk Summary.
+            for other_id, other in list(self._documents.items()):
+                if (
+                    other_id != document_id
+                    and other["session_id"] == record["session_id"]
+                    and other["created_at"] <= record["created_at"]
+                ):
+                    del self._documents[other_id]
 
     def fail_job(self, document_id: str, error: str) -> None:
         with self._lock:
@@ -114,6 +131,7 @@ class InMemoryDocumentStore:
                 f"/api/documents/{document_id}" if record["status"] == COMPLETE else None
             ),
             "delivery": dict(record["delivery"]) if record.get("delivery") else None,
+            "expires_at": record.get("expires_at"),
         }
 
     def get_content(self, document_id: str) -> Optional[tuple[str, str, bytes]]:
@@ -129,6 +147,18 @@ class InMemoryDocumentStore:
     def document_for_session(self, session_id: str) -> Optional[str]:
         return self._session_document.get(session_id)
 
+    def completed_document_for_session(self, session_id: str) -> Optional[str]:
+        """The newest finished pack — what a manager can actually download.
+
+        Differs from document_for_session when a regeneration is running or
+        has failed: the previous pack is still there and still the answer.
+        """
+        done = [
+            (r["created_at"], d) for d, r in self._documents.items()
+            if r["session_id"] == session_id and r["status"] == COMPLETE
+        ]
+        return max(done)[1] if done else None
+
     def set_generation_error(self, session_id: str, message: str) -> None:
         self._generation_errors[session_id] = message
 
@@ -138,21 +168,39 @@ class InMemoryDocumentStore:
     def get_generation_error(self, session_id: str) -> Optional[str]:
         return self._generation_errors.get(session_id)
 
+    def _expiry(self, record: Dict[str, Any]) -> float:
+        if record.get("expires_at") is not None:
+            return record["expires_at"]
+        return record["created_at"] + self._ttl_seconds
+
     def sweep_expired(self) -> int:
-        cutoff = time.time() - self._ttl_seconds
+        now = time.time()
         with self._lock:
             stale = [
                 doc_id
                 for doc_id, record in list(self._documents.items())
-                if record["created_at"] < cutoff
+                if self._expiry(record) < now
             ]
             for doc_id in stale:
-                record = self._documents.pop(doc_id)
-                owner = record["session_id"]
-                if self._session_document.get(owner) == doc_id:
-                    self._session_document.pop(owner, None)
-                    self._generation_errors.pop(owner, None)
+                self._drop(doc_id)
         return len(stale)
+
+    def _drop(self, doc_id: str) -> None:
+        record = self._documents.pop(doc_id)
+        owner = record["session_id"]
+        if self._session_document.get(owner) == doc_id:
+            self._session_document.pop(owner, None)
+            self._generation_errors.pop(owner, None)
+
+    def delete_for_session(self, session_id: str) -> int:
+        """Delete every document and generation error for a session."""
+        with self._lock:
+            doomed = [d for d, r in self._documents.items() if r["session_id"] == session_id]
+            for doc_id in doomed:
+                self._drop(doc_id)
+            self._session_document.pop(session_id, None)
+            self._generation_errors.pop(session_id, None)
+        return len(doomed)
 
     def clear(self) -> None:
         """Test helper — drop everything."""

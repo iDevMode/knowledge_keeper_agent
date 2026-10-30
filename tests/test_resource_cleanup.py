@@ -166,6 +166,9 @@ class TestDocumentRetention:
         store.start_job(doc_id, f"session-for-{doc_id}")
         store.complete_job(doc_id, f"{doc_id}.docx", routes_mod.DOCX_MEDIA_TYPE, b"fake docx")
         store._documents[doc_id]["created_at"] = time.time() - age_seconds
+        # A finished pack expires by its retention date, not its age.
+        if age_seconds:
+            store._documents[doc_id]["expires_at"] = time.time() - 1
 
     def test_expired_documents_are_dropped_and_fresh_ones_kept(self):
         self._make_document("stale-doc", age_seconds=10_000_000)

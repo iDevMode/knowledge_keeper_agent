@@ -3,8 +3,9 @@ import { useNavigate } from 'react-router-dom'
 import {
   SignedOutError,
   createStage1Session,
+  deleteHandover,
+  downloadHandoverPack,
   getAccount,
-  getDownloadUrl,
   listHandovers,
   openHandover,
   signOut,
@@ -14,6 +15,7 @@ import { LogoMark } from './HomePage'
 const REFRESH_MS = 15000
 // Statuses that will change without the manager doing anything.
 const IN_FLIGHT = new Set(['awaiting_employee', 'interview_complete', 'generating'])
+const HAS_PACK = new Set(['ready', 'archived'])
 
 const STATUS_STYLE = {
   setup: 'bg-parchment-100 text-parchment-700',
@@ -21,6 +23,7 @@ const STATUS_STYLE = {
   interview_complete: 'bg-keeper-50 text-keeper-600',
   generating: 'bg-keeper-50 text-keeper-600',
   ready: 'bg-keeper-500 text-white',
+  archived: 'bg-keeper-500 text-white',
   generation_failed: 'bg-red-50 text-red-700',
   expired: 'bg-parchment-100 text-parchment-500',
 }
@@ -46,31 +49,92 @@ function DeliveryLine({ delivery }) {
   )
 }
 
-function HandoverCard({ handover, onOpen, onDownload, busy }) {
+/** What happens to this handover's data, in one line. */
+function RetentionLine({ handover }) {
+  if (!handover.kept_until) return null
+  const date = formatDate(handover.kept_until)
+  if (HAS_PACK.has(handover.status)) {
+    return (
+      <p className="text-xs text-parchment-500 mt-1">
+        Pack kept until {date}, then deleted automatically.
+        {!handover.interview_available && ' The interview transcripts have already been deleted.'}
+      </p>
+    )
+  }
+  if (handover.status === 'expired') {
+    return (
+      <p className="text-xs text-parchment-500 mt-1">
+        The interviews expired before a pack was produced. This entry is removed on {date}.
+      </p>
+    )
+  }
+  return null
+}
+
+function DeleteConfirm({ handover, onCancel, onConfirm, busy }) {
+  const emailed = handover.delivery?.status === 'sent'
+  return (
+    <div className="mt-4 rounded-xl border border-red-200 bg-red-50/60 p-4" role="alertdialog" aria-labelledby={`del-${handover.stage1_session_id}`}>
+      <p id={`del-${handover.stage1_session_id}`} className="text-sm font-medium text-red-800">
+        Delete this handover permanently?
+      </p>
+      <p className="text-xs text-red-700 mt-1">
+        This deletes both interviews, their transcripts and every version of the handover pack. It
+        can't be undone.
+        {handover.status === 'awaiting_employee' && " The employee's interview link will stop working."}
+        {emailed && ' Copies already emailed to recipients are not affected.'}
+      </p>
+      <div className="flex gap-2 mt-3">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onConfirm}
+          className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-60"
+        >
+          {busy ? 'Deleting...' : 'Delete permanently'}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onCancel}
+          className="px-4 py-2 rounded-lg border border-parchment-300 bg-white text-ink text-sm font-medium hover:bg-parchment-50 transition-colors disabled:opacity-60"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function HandoverCard({ handover, onOpen, onDownload, onDelete, busy }) {
+  const [confirming, setConfirming] = useState(false)
   const { status } = handover
   const title = handover.title || (status === 'setup' ? 'New handover' : 'Untitled handover')
+  const canOpen = handover.interview_available && status !== 'expired'
+  const hasPack = HAS_PACK.has(status)
 
   return (
-    <li className="bg-white/70 border border-parchment-200 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-4">
-      <div className="flex-1 min-w-0">
-        <div className="flex flex-wrap items-center gap-2 mb-1">
-          <h3 className="font-display text-lg text-ink-heading truncate">{title}</h3>
-          <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${STATUS_STYLE[status] || STATUS_STYLE.setup}`}>
-            {handover.status_label}
-          </span>
+    <li className="bg-white/70 border border-parchment-200 rounded-2xl p-5">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <h3 className="font-display text-lg text-ink-heading truncate">{title}</h3>
+            <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${STATUS_STYLE[status] || STATUS_STYLE.setup}`}>
+              {handover.status_label}
+            </span>
+          </div>
+          <p className="text-xs text-parchment-500">
+            {handover.company ? `${handover.company} · ` : ''}Started {formatDate(handover.created_at)}
+          </p>
+          {handover.document_error && (
+            <p className="text-xs text-red-600 mt-1">{handover.document_error}</p>
+          )}
+          <DeliveryLine delivery={handover.delivery} />
+          <RetentionLine handover={handover} />
         </div>
-        <p className="text-xs text-parchment-500">
-          {handover.company ? `${handover.company} · ` : ''}Started {formatDate(handover.created_at)}
-        </p>
-        {handover.document_error && (
-          <p className="text-xs text-red-600 mt-1">{handover.document_error}</p>
-        )}
-        <DeliveryLine delivery={handover.delivery} />
-      </div>
 
-      {status !== 'expired' && (
-        <div className="flex gap-2 flex-shrink-0">
-          {status === 'ready' && (
+        <div className="flex flex-wrap gap-2 flex-shrink-0 items-center">
+          {hasPack && (
             <button
               type="button"
               disabled={busy}
@@ -80,19 +144,40 @@ function HandoverCard({ handover, onOpen, onDownload, busy }) {
               Download pack
             </button>
           )}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => onOpen(handover)}
-            className={
-              status === 'ready'
-                ? 'px-4 py-2.5 rounded-lg border border-parchment-300 text-ink text-sm font-medium hover:bg-parchment-50 transition-colors disabled:opacity-60'
-                : 'px-4 py-2.5 rounded-lg bg-keeper-500 text-white text-sm font-medium hover:bg-keeper-400 transition-colors disabled:opacity-60'
-            }
-          >
-            {status === 'setup' ? 'Continue setup' : status === 'awaiting_employee' ? 'Employee link' : 'Open'}
-          </button>
+          {canOpen && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onOpen(handover)}
+              className={
+                hasPack
+                  ? 'px-4 py-2.5 rounded-lg border border-parchment-300 text-ink text-sm font-medium hover:bg-parchment-50 transition-colors disabled:opacity-60'
+                  : 'px-4 py-2.5 rounded-lg bg-keeper-500 text-white text-sm font-medium hover:bg-keeper-400 transition-colors disabled:opacity-60'
+              }
+            >
+              {status === 'setup' ? 'Continue setup' : status === 'awaiting_employee' ? 'Employee link' : 'Open'}
+            </button>
+          )}
+          {!confirming && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setConfirming(true)}
+              className="px-3 py-2.5 rounded-lg text-sm text-red-700 hover:bg-red-50 transition-colors disabled:opacity-60"
+            >
+              Delete
+            </button>
+          )}
         </div>
+      </div>
+
+      {confirming && (
+        <DeleteConfirm
+          handover={handover}
+          busy={busy}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => onDelete(handover)}
+        />
       )}
     </li>
   )
@@ -103,6 +188,7 @@ export default function DashboardPage() {
   const account = getAccount()
   const [handovers, setHandovers] = useState(null)
   const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [starting, setStarting] = useState(false)
 
@@ -168,9 +254,23 @@ export default function DashboardPage() {
 
   async function download(handover) {
     setBusyId(handover.stage1_session_id)
+    setError(null)
     try {
-      await openHandover(handover.stage1_session_id)
-      window.location.href = getDownloadUrl(handover.document_id, handover.stage1_session_id)
+      await downloadHandoverPack(handover.stage1_session_id)
+    } catch (err) {
+      handleError(err)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function remove(handover) {
+    setBusyId(handover.stage1_session_id)
+    setError(null)
+    try {
+      await deleteHandover(handover.stage1_session_id)
+      setHandovers((prev) => prev.filter((h) => h.stage1_session_id !== handover.stage1_session_id))
+      setNotice(`Deleted "${handover.title || 'handover'}".`)
     } catch (err) {
       handleError(err)
     } finally {
@@ -232,6 +332,9 @@ export default function DashboardPage() {
         </div>
 
         {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
+        {notice && !error && (
+          <p className="mb-4 text-sm text-keeper-600" role="status">{notice}</p>
+        )}
 
         {handovers === null ? (
           <div className="flex items-center gap-2 py-10 justify-center text-sm text-parchment-500">
@@ -253,11 +356,17 @@ export default function DashboardPage() {
                 handover={h}
                 onOpen={open}
                 onDownload={download}
+                onDelete={remove}
                 busy={busyId === h.stage1_session_id}
               />
             ))}
           </ul>
         )}
+
+        <p className="mt-10 text-xs text-parchment-500 text-center">
+          Handover packs are deleted automatically on the date shown, or sooner if you delete them.
+          Interview transcripts are deleted within a few days of the interview.
+        </p>
       </main>
     </div>
   )
