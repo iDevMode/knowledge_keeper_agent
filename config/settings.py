@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     # employee longer, raise BOTH values.
     stage1_to_stage2_link_ttl_hours: int = 72
 
+    # Retention (see docs/data-retention.md)
+    # A finished handover pack is kept this long from generation, then deleted
+    # automatically. The interview transcripts and profile behind it are not:
+    # they go when the interview sessions expire (SESSION_TTL_HOURS).
+    document_retention_days: int = 365
+    # How long a handover that never produced a pack (abandoned, or expired
+    # mid-interview) stays on the manager's dashboard before it is removed.
+    expired_handover_visible_days: int = 30
+    # How often each worker runs the deletion sweep in the background.
+    retention_sweep_interval_minutes: int = 60
+
     # Output
     default_output_format: str = "docx"
 
@@ -157,6 +168,8 @@ class Settings(BaseSettings):
                     "SENDGRID_API_KEY is set but EMAIL_FROM_ADDRESS is not — SendGrid "
                     "rejects mail without a verified sender"
                 )
+        if self.document_retention_days < 1:
+            errors.append("DOCUMENT_RETENTION_DAYS must be at least 1")
         if errors:
             for err in errors:
                 print(f"[FATAL] {err}", file=sys.stderr)

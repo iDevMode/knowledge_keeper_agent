@@ -5,6 +5,10 @@
     GET  /api/account/me                     who is signed in
     GET  /api/handovers                      the manager's handovers, with status
     POST /api/handovers/{stage1_id}/access   a manager token for one of them
+    GET  /api/handovers/{stage1_id}/document download the pack, even once the
+                                             interview data has been deleted
+    (DELETE /api/handovers/{stage1_id} lives in routes.py: it needs the
+     checkpointer and session locks.)
 
 The account token never touches a session directly. To work on a handover the
 dashboard exchanges it for the same stage-scoped manager token the rest of the
@@ -16,7 +20,7 @@ import logging
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from api.accounts import get_account_store
@@ -84,13 +88,18 @@ class HandoverSummary(BaseModel):
     company: Optional[str] = None
     created_at: float
     # setup | awaiting_employee | interview_complete | generating | ready |
-    # generation_failed | expired
+    # archived | generation_failed | expired
     status: str
     status_label: str
     stage2_session_id: Optional[str] = None
     document_id: Optional[str] = None
     document_error: Optional[str] = None
     delivery: Optional[HandoverDelivery] = None
+    # When this handover (and its pack) will be deleted automatically.
+    kept_until: Optional[float] = None
+    # False once the interview sessions and transcripts have been deleted:
+    # the pack can still be downloaded, but not reopened or regenerated.
+    interview_available: bool = True
 
 
 class HandoverAccessResponse(BaseModel):
@@ -198,6 +207,7 @@ _LABELS = {
     "interview_complete": "Employee interview complete",
     "generating": "Preparing the handover pack",
     "ready": "Handover pack ready",
+    "archived": "Handover pack ready",
     "generation_failed": "Handover pack could not be generated",
     "expired": "Expired",
 }
@@ -208,53 +218,72 @@ def summarise_handover(row: dict) -> HandoverSummary:
     documents = get_document_store()
     stage1_id = row["stage1_session_id"]
 
+    stage1 = sessions.get_session(stage1_id)
+    # Recorded on the handover so the pack can be found after the session
+    # links are swept; older records fall back to the live link.
+    stage2_id = row.get("stage2_session_id") or (
+        sessions.get_linked_session(stage1_id) if stage1 else None
+    )
+
     summary = HandoverSummary(
         stage1_session_id=stage1_id,
         title=row.get("title"),
         created_at=row["created_at"],
         status="setup",
         status_label="",
+        stage2_session_id=stage2_id,
+        kept_until=row.get("retain_until"),
+        interview_available=stage1 is not None,
     )
 
-    stage1 = sessions.get_session(stage1_id)
+    if stage1 is not None:
+        profile = sessions.get_profile(stage1_id)
+        if profile is not None:
+            summary.title = summary.title or profile.job_title
+            summary.company = profile.company_name
+
+    pack_id = documents.completed_document_for_session(stage2_id) if stage2_id else None
+    latest_id = documents.document_for_session(stage2_id) if stage2_id else None
+    latest = (documents.get_job(latest_id) or {}) if latest_id else {}
+
+    if pack_id:
+        pack = documents.get_job(pack_id) or {}
+        summary.document_id = pack_id
+        if pack.get("delivery"):
+            summary.delivery = HandoverDelivery(**pack["delivery"])
+
     if stage1 is None:
-        summary.status = "expired"
-        summary.status_label = _LABELS["expired"]
-        return summary
-
-    profile = sessions.get_profile(stage1_id)
-    if profile is not None:
-        summary.title = summary.title or profile.job_title
-        summary.company = profile.company_name
-
-    if not stage1.get("session_complete"):
+        # Interview data has been deleted. Either the pack survives it, or
+        # nothing is left but the record.
+        summary.status = "archived" if pack_id else "expired"
+    elif pack_id:
+        summary.status = "ready"
+    elif not stage1.get("session_complete"):
         summary.status = "setup"
     else:
-        summary.status = "awaiting_employee"
-        stage2_id = sessions.get_linked_session(stage1_id)
-        summary.stage2_session_id = stage2_id
         stage2 = sessions.get_session(stage2_id) if stage2_id else None
+        summary.status = "awaiting_employee"
         if stage2 and stage2.get("session_complete"):
             summary.status = "interview_complete"
             summary.document_error = documents.get_generation_error(stage2_id)
             if summary.document_error:
                 summary.status = "generation_failed"
-            document_id = documents.document_for_session(stage2_id)
-            if document_id:
-                job = documents.get_job(document_id) or {}
-                summary.document_id = document_id
-                if job.get("status") == COMPLETE:
-                    summary.status = "ready"
-                elif job.get("status") == GENERATING:
-                    summary.status = "generating"
-                elif job.get("status") == FAILED:
-                    summary.status = "generation_failed"
-                    summary.document_error = job.get("error")
-                if job.get("delivery"):
-                    summary.delivery = HandoverDelivery(**job["delivery"])
+        if latest.get("status") == GENERATING:
+            summary.status = "generating"
+        elif latest.get("status") == FAILED:
+            summary.status = "generation_failed"
+            summary.document_error = latest.get("error")
 
     summary.status_label = _LABELS[summary.status]
     return summary
+
+
+def _owned_handover(stage1_session_id: str, claims: TokenClaims) -> dict:
+    """The caller's handover record, or 404 — never 403, so ids cannot be probed."""
+    row = get_account_store().get_handover(stage1_session_id)
+    if row is None or row["manager_id"] != claims.manager_id:
+        raise HTTPException(status_code=404, detail="Handover not found")
+    return row
 
 
 @router.get("/api/handovers", response_model=List[HandoverSummary])
@@ -269,14 +298,43 @@ def handover_access(stage1_session_id: str, claims: TokenClaims = Depends(requir
 
     404 for both "not yours" and "does not exist", so ids cannot be probed.
     """
-    owner = get_account_store().owner_of_handover(stage1_session_id)
-    if owner != claims.manager_id:
-        raise HTTPException(status_code=404, detail="Handover not found")
+    _owned_handover(stage1_session_id, claims)
     if get_session_store().get_session(stage1_session_id) is None:
         raise HTTPException(status_code=410, detail="This handover has expired")
     return HandoverAccessResponse(
         session_id=stage1_session_id,
         token=issue_token(stage1_session_id, MANAGER),
+    )
+
+
+@router.get("/api/handovers/{stage1_session_id}/document")
+def download_handover_pack(stage1_session_id: str, claims: TokenClaims = Depends(require_account)):
+    """Download the newest finished pack.
+
+    Authorised by handover ownership rather than a session token, so it keeps
+    working for the whole retention period — after the interview sessions,
+    and the manager tokens bound to them, have gone. Header auth only: the
+    dashboard fetches it, so no long-lived token ever appears in a URL.
+    """
+    row = _owned_handover(stage1_session_id, claims)
+    documents = get_document_store()
+    stage2_id = row.get("stage2_session_id") or get_session_store().get_linked_session(
+        stage1_session_id
+    )
+    document_id = documents.completed_document_for_session(stage2_id) if stage2_id else None
+    stored = documents.get_content(document_id) if document_id else None
+    if stored is None:
+        raise HTTPException(status_code=404, detail="There is no handover pack to download")
+
+    stored_name, media_type, content = stored
+    extension = stored_name.rsplit(".", 1)[-1] if "." in stored_name else "docx"
+    title = row.get("title") or "Handover pack"
+    safe = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:80] or "Handover pack"
+    logger.info("handover=%s pack downloaded", stage1_session_id)
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="Handover - {safe}.{extension}"'},
     )
 
 
@@ -304,11 +362,17 @@ def notify_manager(stage2_session_id: str, profile, ready: bool, detail: Optiona
         dashboard = f"{settings.public_base_url.rstrip('/')}/dashboard"
         if ready:
             subject = f"Handover pack ready: {role}"
+            kept_until = time.strftime(
+                "%d %B %Y", time.gmtime(time.time() + settings.document_retention_days * 86400)
+            )
             lines = [
                 "Hello,",
                 f"The employee interview for the {role} role is complete and the handover pack is ready.",
                 detail or "",
                 f"Open your dashboard to download it: {dashboard}",
+                f"The pack is kept until {kept_until}, then deleted automatically. You can delete "
+                "it sooner from the dashboard. The interview transcripts behind it are deleted "
+                "within a few days.",
                 "KnowledgeKeeper by Nukode",
             ]
         else:
