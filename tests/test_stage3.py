@@ -211,6 +211,53 @@ class TestContextAssembly:
         block_pos = formatted.find("Internal Processes Workflows")
         assert orientation_pos < block_pos
 
+    def test_transcript_carries_the_question_not_just_its_index(self):
+        """`Q3: <answer>` left the synthesis model guessing what had been asked.
+
+        The question banks hold interviewer briefs, so the brief is what gets
+        rendered — it states the subject, which is the part that was missing.
+        """
+        formatted = _format_answers_by_block(
+            {"internal_processes_workflows.2": ["Nobody wrote it down."]},
+            ["internal_processes_workflows"],
+            {"internal_processes_workflows": "full"},
+        )
+        assert "documented anywhere" in formatted
+        assert "A: Nobody wrote it down." in formatted
+
+    def test_transcript_labels_follow_up_answers_separately(self):
+        formatted = _format_answers_by_block(
+            {
+                "internal_processes_workflows.0": [
+                    "I run the reconciliation macro, then check three banks.",
+                    "Premier, Lloyds and the Dutch one.",
+                ]
+            },
+            ["internal_processes_workflows"],
+            {"internal_processes_workflows": "full"},
+        )
+        assert "A: I run the reconciliation macro, then check three banks." in formatted
+        assert "A (follow-up): Premier, Lloyds and the Dutch one." in formatted
+
+    def test_transcript_renders_a_legacy_string_valued_answer(self):
+        """A checkpoint written before the list-valued store still generates."""
+        formatted = _format_answers_by_block(
+            {"closing_sequence.1": "Trust the macro, not the docs."},
+            [],
+            {},
+        )
+        assert "A: Trust the macro, not the docs." in formatted
+
+    def test_question_brief_absent_for_an_unknown_block(self):
+        """An out-of-range or renamed block must not crash generation."""
+        formatted = _format_answers_by_block(
+            {"retired_block.99": ["Something."]},
+            ["retired_block"],
+            {},
+        )
+        assert "Q99:" in formatted
+        assert "A: Something." in formatted
+
     def test_no_risk_flags_omits_section(self):
         req = _make_generation_request("process_heavy")
         context = build_context_block(

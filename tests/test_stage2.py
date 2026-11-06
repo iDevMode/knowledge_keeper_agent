@@ -570,9 +570,51 @@ class TestProcessAnswerNode:
             ],
         )
         result = process_answer_node(state)
-        assert result["answers"]["internal_processes_workflows.1"] == "An email from the production manager."
+        assert result["answers"]["internal_processes_workflows.1"] == [
+            "An email from the production manager."
+        ]
 
-    def test_resets_followup_count(self):
+    def test_appends_follow_up_answers_instead_of_overwriting(self):
+        """The follow-up loop re-enters this node with the same block and index.
+
+        Assigning there kept only the last fragment of every exchange, so the
+        substantive first answer never reached Stage 3.
+        """
+        first = _make_state(
+            current_block="internal_processes_workflows",
+            current_question_index=1,
+            conversation_history=[
+                AIMessage(content="Walk me through month-end."),
+                HumanMessage(content="I run the reconciliation macro, then check three banks."),
+            ],
+        )
+        after_first = process_answer_node(first)
+
+        followup = _make_state(
+            current_block="internal_processes_workflows",
+            current_question_index=1,
+            followup_count=1,
+            answers=after_first["answers"],
+            conversation_history=[
+                AIMessage(content="Which three banks?"),
+                HumanMessage(content="Premier, Lloyds and the Dutch one."),
+            ],
+        )
+        result = process_answer_node(followup)
+
+        assert result["answers"]["internal_processes_workflows.1"] == [
+            "I run the reconciliation macro, then check three banks.",
+            "Premier, Lloyds and the Dutch one.",
+        ]
+
+    def test_does_not_reset_followup_count(self):
+        """Resetting here made MAX_FOLLOWUPS_PER_QUESTION unreachable.
+
+        This node runs on the answer *to* a follow-up as well as the first
+        answer, so a reset returned the counter to zero before the classifier
+        could read it. `ask_question_node` and `advance_question_node` own the
+        reset instead.
+        """
         state = _make_state(
             current_block="role_orientation",
             current_question_index=0,
@@ -580,4 +622,18 @@ class TestProcessAnswerNode:
             conversation_history=[HumanMessage(content="I coordinate production.")],
         )
         result = process_answer_node(state)
-        assert result["followup_count"] == 0
+        assert "followup_count" not in result
+
+    def test_tolerates_a_pre_existing_string_valued_answer(self):
+        """A checkpoint written before the list-valued store must still resume."""
+        state = _make_state(
+            current_block="role_orientation",
+            current_question_index=0,
+            answers={"role_orientation.0": "I coordinate production."},
+            conversation_history=[HumanMessage(content="Mostly scheduling and escalations.")],
+        )
+        result = process_answer_node(state)
+        assert result["answers"]["role_orientation.0"] == [
+            "I coordinate production.",
+            "Mostly scheduling and escalations.",
+        ]
