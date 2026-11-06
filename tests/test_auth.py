@@ -501,6 +501,9 @@ class TestTransactionPoolerIsRejected:
             environment="production",
             allowed_origins="https://example.com",
             database_url=url,
+            sendgrid_api_key="x",
+            email_from_address="noreply@example.com",
+            public_base_url="https://example.com",
             **overrides,
         )
 
