@@ -49,7 +49,19 @@ _REQUIRED_SENTINELS = [
 # Knowledge Transfer appears multiple times (once per priority)
 _KNOWLEDGE_TRANSFER_MIN_COUNT = 3
 
-_MAX_TOKENS = 12000
+# The pack has 14 sections; 12,000 tokens was enough to truncate a detailed
+# one mid-section. Current models allow far more output than this, and the call
+# streams, so the ceiling is about cost control rather than a hard limit.
+_MAX_TOKENS = 32000
+
+
+class GenerationTruncatedError(RuntimeError):
+    """The model stopped before finishing the document.
+
+    Raised rather than returned: a pack cut off mid-section can still contain
+    every sentinel marker (each section just shorter than it should be), so the
+    structural check alone would pass it and email it.
+    """
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -60,17 +72,32 @@ def _get_client() -> anthropic.Anthropic:
     )
 
 
+_COMPLETE_STOP_REASONS = {"end_turn", "stop_sequence"}
+
+
 def _stream_generation(client: anthropic.Anthropic, system: str, user_content: str) -> str:
-    """Generate document using streaming to keep connection alive."""
+    """Generate document using streaming to keep connection alive.
+
+    Raises:
+        GenerationTruncatedError: if the model stopped for any reason other
+            than finishing (output limit, context limit, refusal).
+    """
     chunks = []
     with client.messages.stream(
-        model=settings.primary_model,
+        model=settings.synthesis_model,
         max_tokens=_MAX_TOKENS,
         system=system,
         messages=[{"role": "user", "content": user_content}],
     ) as stream:
         for text in stream.text_stream:
             chunks.append(text)
+        stop_reason = stream.get_final_message().stop_reason
+
+    if stop_reason not in _COMPLETE_STOP_REASONS:
+        raise GenerationTruncatedError(
+            f"Document generation stopped early (stop_reason={stop_reason}) after "
+            f"{len(''.join(chunks))} characters — the pack would be incomplete"
+        )
     return "".join(chunks)
 
 
@@ -112,7 +139,7 @@ def generate_document(request: GenerationRequest) -> GenerationResult:
 
     logger.info(
         "session=%s stage=3 node=generate_document model=%s answers=%d flags=%d",
-        session_id, settings.primary_model, len(request.answers), len(request.risk_flags),
+        session_id, settings.synthesis_model, len(request.answers), len(request.risk_flags),
     )
 
     # Build full context
@@ -162,7 +189,7 @@ def generate_document(request: GenerationRequest) -> GenerationResult:
     metadata = {
         "question_count": len(request.answers),
         "risk_flag_count": len(request.risk_flags),
-        "model": settings.primary_model,
+        "model": settings.synthesis_model,
     }
 
     logger.info("session=%s stage=3 document generated successfully", session_id)

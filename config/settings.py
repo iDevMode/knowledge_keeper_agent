@@ -2,6 +2,7 @@ import os
 import sys
 from urllib.parse import urlsplit
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -10,6 +11,10 @@ from pydantic_settings import BaseSettings
 # checked: the hostname varies by provider and region, and a URL that reaches a
 # transaction pooler on any host has the same problem.
 _TRANSACTION_POOLER_PORT = 6543
+
+_DEFAULT_INTERVIEWER_MODEL = "claude-sonnet-5-5"
+_DEFAULT_ANALYST_MODEL = "claude-haiku-5-5"
+_DEFAULT_SYNTHESIS_MODEL = "claude-opus-5-5"
 
 
 def uses_transaction_pooler(database_url: str) -> bool:
@@ -27,8 +32,24 @@ def uses_transaction_pooler(database_url: str) -> bool:
 class Settings(BaseSettings):
     # LLM
     anthropic_api_key: str = ""
-    primary_model: str = "claude-sonnet-4-6"
-    classifier_model: str = "claude-haiku-4-5-20251001"
+    # Each job has its own model setting, because they want different
+    # trade-offs: the interviewer needs a strong conversational model at low
+    # latency, the analysts run twice per turn and must be cheap, and synthesis
+    # runs once per handover where quality matters most.
+    #
+    #   INTERVIEWER_MODEL  Stage 2 questions        falls back to PRIMARY_MODEL
+    #   ANALYST_MODEL      follow-up + risk checks  falls back to CLASSIFIER_MODEL
+    #   SYNTHESIS_MODEL    Stage 3 handover pack    falls back to PRIMARY_MODEL
+    #   PRIMARY_MODEL      Stage 1 interview and profile
+    #   CLASSIFIER_MODEL   Stage 1 classifiers
+    #
+    # The fallbacks keep existing deployments that set only PRIMARY_MODEL /
+    # CLASSIFIER_MODEL on exactly the models they chose.
+    primary_model: str = "claude-sonnet-5-5"
+    classifier_model: str = "claude-haiku-5-5"
+    interviewer_model_override: str = Field(default="", validation_alias="INTERVIEWER_MODEL")
+    analyst_model_override: str = Field(default="", validation_alias="ANALYST_MODEL")
+    synthesis_model_override: str = Field(default="", validation_alias="SYNTHESIS_MODEL")
 
     # Persistence (review finding H3)
     # When unset, all state is held in-process: sessions, LangGraph checkpoints
@@ -116,6 +137,29 @@ class Settings(BaseSettings):
             env_val = os.environ.get(env_name)
             if env_val and not getattr(self, field_name, None):
                 object.__setattr__(self, field_name, env_val)
+
+    @property
+    def interviewer_model(self) -> str:
+        return self.interviewer_model_override or self._explicit("primary_model") or _DEFAULT_INTERVIEWER_MODEL
+
+    @property
+    def analyst_model(self) -> str:
+        return self.analyst_model_override or self._explicit("classifier_model") or _DEFAULT_ANALYST_MODEL
+
+    @property
+    def synthesis_model(self) -> str:
+        return self.synthesis_model_override or self._explicit("primary_model") or _DEFAULT_SYNTHESIS_MODEL
+
+    def _explicit(self, field_name: str) -> str:
+        """The field's value only if the deployment set it, else "".
+
+        A fallback to PRIMARY_MODEL must not fire just because the field has a
+        default — otherwise synthesis would silently run on the interview model
+        and the per-job defaults would never apply.
+        """
+        if field_name in self.model_fields_set or os.environ.get(field_name.upper()):
+            return getattr(self, field_name)
+        return ""
 
     def validate_for_production(self) -> None:
         """Check critical settings are configured. Call at startup."""
