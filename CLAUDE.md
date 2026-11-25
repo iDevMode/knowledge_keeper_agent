@@ -71,6 +71,8 @@ Key prompt construction rules:
 - If the follow-up classifier call fails, default to `needs_followup: false` and advance — never block the main conversation for a classifier failure
 
 **Testing**
+- Interview quality is measured by the eval harness (`evals/`, `docs/EVALS.md`). A change to Stage 2 behaviour must not make any score in `evals/gate.json` worse; if it improves them, regenerate the gate (`python -m evals.run_eval --update-gate`) and quote the before/after in the PR
+- Models are created only through `config/llm_provider.py`; the node-level `_get_*_llm` helpers delegate to it and remain the patch points for unit tests
 - Every block in Stage 2 must have a unit test with a sample answer set covering: clear answer (no followup needed), vague answer (followup needed), refusal (move on), and partial answer (flag as gap)
 - Stage 3 document generation tests use fixture Role Intelligence Profiles from `tests/fixtures/sample_role_profiles.json`
 - Include at least one fixture for each role type: process-heavy, decision-heavy, relationship-heavy
@@ -150,6 +152,11 @@ python -m agents.stage1_business_interview.graph --mode cli
 
 # Run Stage 2 with a fixture profile (CLI for testing)
 python -m agents.stage2_employee_interview.graph --mode cli --profile tests/fixtures/sample_role_profiles.json --profile-id relationship_heavy
+
+# Interview quality eval — scripted (no API key, seconds) or live (real models)
+python -m evals.run_eval
+python -m evals.run_eval --check-gate      # fails if any score is worse than evals/gate.json
+ANTHROPIC_API_KEY=... python -m evals.run_eval --live
 
 # Generate a test document from fixture Stage 2 results (mocked LLM)
 python -m scripts.run_mock_generation [profile_id]
