@@ -403,6 +403,7 @@ class TestEmailConfiguration:
             database_url="postgresql://unused",
             environment="production",
             allowed_origins="https://example.com",
+            public_base_url="https://knowledgekeeper.example.com",
             **kw,
         )
 
@@ -411,9 +412,23 @@ class TestEmailConfiguration:
             self._production(sendgrid_api_key="SG.x", email_from_address="").validate_for_production()
         assert "EMAIL_FROM_ADDRESS" in capsys.readouterr().err
 
-    def test_no_key_only_warns(self, capsys):
-        self._production(sendgrid_api_key="").validate_for_production()
+    def test_no_key_refuses_to_start(self, capsys):
+        """Managers sign in by emailed link, so without email nobody can."""
+        with pytest.raises(SystemExit):
+            self._production(sendgrid_api_key="").validate_for_production()
         assert "SENDGRID_API_KEY is not set" in capsys.readouterr().err
+
+    def test_a_localhost_public_url_refuses_to_start(self, capsys):
+        from config.settings import Settings
+
+        with pytest.raises(SystemExit):
+            Settings(
+                _env_file=None, anthropic_api_key="x", api_secret_key="x",
+                database_url="postgresql://unused", environment="production",
+                allowed_origins="https://example.com",
+                sendgrid_api_key="SG.x", email_from_address="a@b.co",
+            ).validate_for_production()
+        assert "PUBLIC_BASE_URL" in capsys.readouterr().err
 
     def test_a_complete_email_config_is_accepted(self, capsys):
         self._production(

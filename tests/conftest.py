@@ -16,3 +16,13 @@ def outbox():
     set_mailer(mailer)
     yield mailer
     set_mailer(None)
+
+
+@pytest.fixture(autouse=True)
+def fresh_account_store():
+    """Accounts are per-test, like sessions and documents."""
+    from api.accounts import reset_account_store
+
+    reset_account_store()
+    yield
+    reset_account_store()

@@ -90,6 +90,33 @@ CREATE TABLE IF NOT EXISTS kk_generation_errors (
     session_id  TEXT PRIMARY KEY,
     message     TEXT NOT NULL
 );
+
+-- Manager accounts (magic-link sign-in) and which handovers they own.
+CREATE TABLE IF NOT EXISTS kk_managers (
+    manager_id  TEXT PRIMARY KEY,
+    email       TEXT NOT NULL UNIQUE,
+    created_at  DOUBLE PRECISION NOT NULL
+);
+
+-- Only a SHA-256 hash of each sign-in token is stored.
+CREATE TABLE IF NOT EXISTS kk_login_tokens (
+    token_hash  TEXT PRIMARY KEY,
+    email       TEXT NOT NULL,
+    created_at  DOUBLE PRECISION NOT NULL,
+    expires_at  DOUBLE PRECISION NOT NULL,
+    used_at     DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS kk_login_tokens_email ON kk_login_tokens (email, created_at);
+
+-- Outlives the sessions it points at, so an expired handover still lists.
+-- Holds ids, a title and a timestamp only — no interview content.
+CREATE TABLE IF NOT EXISTS kk_handovers (
+    stage1_session_id TEXT PRIMARY KEY,
+    manager_id        TEXT NOT NULL,
+    title             TEXT,
+    created_at        DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kk_handovers_manager ON kk_handovers (manager_id, created_at);
 """
 
 
@@ -534,5 +561,118 @@ class PostgresDocumentStore:
     def close(self) -> None:
         # Only close a pool we created. The shared one outlives any single
         # store and closing it here would break the others.
+        if self._owns_pool:
+            self._pool.close()
+
+
+class PostgresAccountStore:
+    """AccountStore backed by Postgres. See the protocol in api.accounts."""
+
+    def __init__(self, conninfo: Optional[str] = None, pool: Optional[ConnectionPool] = None):
+        self._owns_pool = pool is None and bool(conninfo)
+        self._pool = _pool_for(conninfo, pool, settings.db_pool_size)
+        with self._pool.connection() as conn:
+            apply_schema(conn)
+
+    def get_or_create_manager(self, email: str) -> str:
+        import uuid
+
+        email = email.strip().lower()
+        with self._pool.connection() as conn:
+            # Upsert so two simultaneous first sign-ins agree on one id.
+            row = conn.execute(
+                "INSERT INTO kk_managers (manager_id, email, created_at) VALUES (%s, %s, %s) "
+                "ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email "
+                "RETURNING manager_id",
+                (str(uuid.uuid4()), email, time.time()),
+            ).fetchone()
+        return row[0]
+
+    def get_manager(self, manager_id: str) -> Optional[Dict[str, Any]]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT manager_id, email, created_at FROM kk_managers WHERE manager_id = %s",
+                (manager_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"manager_id": row[0], "email": row[1], "created_at": row[2]}
+
+    def create_login_token(self, email: str, ttl_seconds: float) -> str:
+        from api.accounts import hash_login_token, new_login_token
+
+        raw = new_login_token()
+        now = time.time()
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO kk_login_tokens (token_hash, email, created_at, expires_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (hash_login_token(raw), email.strip().lower(), now, now + ttl_seconds),
+            )
+        return raw
+
+    def consume_login_token(self, raw_token: str) -> Optional[str]:
+        from api.accounts import hash_login_token
+
+        # One statement, so two clicks on the same link cannot both succeed.
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE kk_login_tokens SET used_at = %s "
+                "WHERE token_hash = %s AND used_at IS NULL AND expires_at >= %s "
+                "RETURNING email",
+                (time.time(), hash_login_token(raw_token), time.time()),
+            ).fetchone()
+        return row[0] if row else None
+
+    def count_login_tokens_since(self, email: str, since: float) -> int:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM kk_login_tokens WHERE email = %s AND created_at >= %s",
+                (email.strip().lower(), since),
+            ).fetchone()
+        return int(row[0])
+
+    def add_handover(self, stage1_session_id: str, manager_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO kk_handovers (stage1_session_id, manager_id, created_at) "
+                "VALUES (%s, %s, %s) ON CONFLICT (stage1_session_id) DO NOTHING",
+                (stage1_session_id, manager_id, time.time()),
+            )
+
+    def set_handover_title(self, stage1_session_id: str, title: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE kk_handovers SET title = %s WHERE stage1_session_id = %s",
+                (title, stage1_session_id),
+            )
+
+    def owner_of_handover(self, stage1_session_id: str) -> Optional[str]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT manager_id FROM kk_handovers WHERE stage1_session_id = %s",
+                (stage1_session_id,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def list_handovers(self, manager_id: str) -> List[Dict[str, Any]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT stage1_session_id, title, created_at FROM kk_handovers "
+                "WHERE manager_id = %s ORDER BY created_at DESC",
+                (manager_id,),
+            ).fetchall()
+        return [
+            {"stage1_session_id": r[0], "title": r[1], "created_at": r[2]} for r in rows
+        ]
+
+    def sweep_expired(self) -> int:
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM kk_login_tokens WHERE expires_at < %s", (time.time(),)
+            )
+            return cur.rowcount or 0
+
+    def close(self) -> None:
         if self._owns_pool:
             self._pool.close()

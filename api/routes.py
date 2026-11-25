@@ -31,7 +31,9 @@ from api.auth import (
     verify_token,
 )
 from api import llm_errors
-from api.delivery import deliver_handover_pack
+from api.accounts import get_account_store
+from api.account_routes import notify_manager, require_account, router as account_router
+from api.delivery import SENT, SKIPPED, deliver_handover_pack
 from api.document_store import get_document_store
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
@@ -95,6 +97,9 @@ class SessionStatusResponse(BaseModel):
     generation_error: Optional[str] = None
     # Whether the pack was emailed, to whom, or why not. Manager only.
     delivery: Optional[DeliveryInfo] = None
+    # The confirmed Role Intelligence Profile, for a manager reopening a
+    # completed Stage 1 from the dashboard.
+    profile: Optional[dict] = None
     # The employee's session is now created by the manager, so the employee
     # never sees the creation response that carried the opening question. They
     # pick it up here when they open their link, which also restores the last
@@ -729,9 +734,13 @@ def _run_generation_in_background(
         if send_email:
             # After complete_job, so the pack is downloadable whatever happens
             # here; deliver_handover_pack records failures rather than raising.
-            deliver_handover_pack(
+            delivery = deliver_handover_pack(
                 session_id, document_id, profile, filename, media_type, content
             )
+            notify_manager(session_id, profile, ready=True, detail={
+                SENT: "It has also been emailed to the recipients you listed.",
+                SKIPPED: "It was not emailed to anyone, because no recipient addresses were given.",
+            }.get(delivery, "Emailing it to your recipients failed — the dashboard has the details."))
         logger.info(
             "session=%s document=%s format=%s bytes=%d generation=complete",
             session_id, document_id, output_format, len(content),
@@ -748,10 +757,14 @@ def _run_generation_in_background(
                 e, failure, session=session_id, document=document_id
             )
             get_document_store().fail_job(document_id, failure.detail)
+            if send_email:
+                notify_manager(session_id, profile, ready=False)
             return
 
         logger.error("session=%s document=%s generation failed: %s", session_id, document_id, e)
         get_document_store().fail_job(document_id, str(e))
+        if send_email:
+            notify_manager(session_id, profile, ready=False)
 
 
 # ---- Endpoints ----
@@ -763,10 +776,16 @@ def health_check():
 
 
 @app.post("/api/sessions/stage1", response_model=SessionCreatedResponse)
-def create_stage1():
+def create_stage1(account: TokenClaims = Depends(require_account)):
+    """Start a handover. Requires a signed-in manager, who then owns it.
+
+    Previously anyone could start one anonymously, and the handover belonged to
+    whichever browser tab held the token — close it and the pack was lost.
+    """
     sweep_resources()
     store = get_session_store()
     session_id = store.create_session(stage=1)
+    get_account_store().add_handover(session_id, account.manager_id)
 
     instance = _registry.create_stage1(session_id)
 
@@ -929,6 +948,9 @@ def send_message(session_id: str, request: SendMessageRequest):
         profile = store.get_profile(session_id)
         if profile is not None:
             response.profile = profile.model_dump()
+            # Kept on the handover record so the dashboard can still name it
+            # after the session and profile have been swept.
+            get_account_store().set_handover_title(session_id, profile.job_title)
         else:
             logger.warning(
                 "session=%s stage=1 completed without a confirmed profile", session_id
@@ -950,11 +972,13 @@ def send_message(session_id: str, request: SendMessageRequest):
         except GenerationNotReady as e:
             logger.error("session=%s auto-generation skipped: %s", session_id, e)
             get_document_store().set_generation_error(session_id, str(e))
+            notify_manager(session_id, None, ready=False)
         except Exception as e:
             logger.error("session=%s auto-generation failed to start: %s", session_id, e)
             get_document_store().set_generation_error(
                 session_id, "Document generation could not be started"
             )
+            notify_manager(session_id, None, ready=False)
         on_stage2_complete(session_id)
 
     return response
@@ -986,6 +1010,10 @@ def get_session_status(
         documents = get_document_store()
         response.document_id = documents.document_for_session(session_id)
         response.generation_error = documents.get_generation_error(session_id)
+        if session.get("stage") == 1:
+            profile = store.get_profile(session_id)
+            if profile is not None:
+                response.profile = profile.model_dump()
         if response.document_id:
             job = documents.get_job(response.document_id)
             if job and job.get("delivery"):
@@ -1067,6 +1095,11 @@ def download_document(document_id: str):
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ---- Manager accounts and dashboard ----
+
+app.include_router(account_router)
 
 
 # ---- SPA Fallback (must be last) ----
