@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 import uuid
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
@@ -93,6 +94,9 @@ class InMemorySessionStore:
 
 
 _store: SessionStore | None = None
+# Two request threads arriving together must not both build a store (and both
+# run the schema DDL).
+_store_guard = threading.Lock()
 
 
 def get_session_store() -> SessionStore:
@@ -104,7 +108,11 @@ def get_session_store() -> SessionStore:
     way it refuses without API_SECRET_KEY — see Settings.validate_for_production.
     """
     global _store
-    if _store is None:
+    if _store is not None:
+        return _store
+    with _store_guard:
+        if _store is not None:
+            return _store
         if settings.database_url:
             # Imported lazily so psycopg is not required to run in-memory.
             from api.postgres_store import PostgresSessionStore

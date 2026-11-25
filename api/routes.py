@@ -133,7 +133,11 @@ def _build_checkpointer() -> Any:
         open=True,
     )
     saver = PostgresSaver(pool)
-    saver.setup()
+    # Serialised across workers: concurrent migrations on a fresh database
+    # failed the losing worker's first request (see setup_checkpointer).
+    from api.postgres_store import setup_checkpointer
+
+    setup_checkpointer(saver, pool)
     logger.info("checkpointer: postgres")
     return saver
 

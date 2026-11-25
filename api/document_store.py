@@ -147,11 +147,16 @@ class InMemoryDocumentStore:
 
 
 _store: DocumentStore | None = None
+_store_guard = threading.Lock()
 
 
 def get_document_store() -> DocumentStore:
     global _store
-    if _store is None:
+    if _store is not None:
+        return _store
+    with _store_guard:
+        if _store is not None:
+            return _store
         if settings.database_url:
             from api.postgres_store import PostgresDocumentStore
 
