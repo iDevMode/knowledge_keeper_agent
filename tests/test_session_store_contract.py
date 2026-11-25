@@ -232,6 +232,59 @@ class TestExpiry:
         assert store.sweep_expired() == 0
 
 
+class TestExtendAndDelete:
+    TINY_TTL_HOURS = 1 / 3600  # one second
+
+    def test_extending_keeps_a_session_alive_past_its_ttl(self, store_factory):
+        """Stage 1 must live as long as the Stage 2 interview it feeds: the
+        profile is read when the employee finishes, which can be days later."""
+        store = store_factory(ttl_hours=self.TINY_TTL_HOURS)
+        session_id = store.create_session(stage=1)
+        store.extend_session(session_id, time.time() + 60)
+        time.sleep(1.2)
+
+        assert store.get_session(session_id) is not None
+        assert store.sweep_expired() == 0
+
+    def test_extending_never_shortens(self, store):
+        session_id = store.create_session(stage=1)
+        store.extend_session(session_id, time.time() - 10)
+        assert store.get_session(session_id) is not None
+
+    def test_an_expired_session_cannot_be_revived(self, store_factory):
+        store = store_factory(ttl_hours=self.TINY_TTL_HOURS)
+        session_id = store.create_session(stage=1)
+        time.sleep(1.2)
+        store.extend_session(session_id, time.time() + 60)
+        assert store.get_session(session_id) is None
+
+    def test_delete_removes_session_profile_and_both_link_directions(self, store):
+        s1 = store.create_session(stage=1)
+        s2 = store.create_session(stage=2)
+        store.link_sessions(s1, s2)
+        store.store_profile(s1, _load_profile())
+
+        store.delete_session(s1)
+
+        assert store.get_session(s1) is None
+        assert store.get_profile(s1) is None
+        assert store.get_linked_session(s1) is None
+        assert store.get_linked_session(s2) is None
+        assert store.get_session(s2) is not None
+
+    def test_deleting_an_unknown_session_is_harmless(self, store):
+        store.delete_session("nobody")
+
+    def test_sweep_reports_which_sessions_it_removed(self, store_factory):
+        """So the caller can delete their transcripts, which live elsewhere."""
+        store = store_factory(ttl_hours=self.TINY_TTL_HOURS)
+        doomed = store.create_session(stage=2)
+        time.sleep(1.2)
+        store.create_session(stage=1)
+
+        assert store.sweep_expired_ids() == [doomed]
+
+
 class TestProtocolConformance:
     def test_the_store_satisfies_the_protocol(self, store):
         from api.session_manager import SessionStore

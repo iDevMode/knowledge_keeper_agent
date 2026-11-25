@@ -4,7 +4,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -34,6 +34,8 @@ from api import llm_errors
 from api.accounts import get_account_store
 from api.account_routes import notify_manager, require_account, router as account_router
 from api.delivery import SENT, SKIPPED, deliver_handover_pack
+from api import retention
+from api.accounts import default_handover_window
 from api.document_store import get_document_store
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
@@ -357,8 +359,33 @@ def parse_allowed_origins(raw: str) -> list[str]:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Apply the retention policy on a timer, not only when requests arrive.
+
+    Opportunistic sweeps ran only when someone started an interview, so on a
+    quiet deployment a pack due for deletion could sit for weeks. Each worker
+    runs its own; every step is idempotent.
+    """
+    stop = threading.Event()
+    interval = max(60, settings.retention_sweep_interval_minutes * 60)
+
+    def loop() -> None:
+        while not stop.wait(interval):
+            try:
+                sweep_resources(force=True)
+            except Exception as e:
+                logger.error("retention sweep failed: %s", e)
+
+    threading.Thread(target=loop, name="retention-sweeper", daemon=True).start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="KnowledgeKeeper API", version="1.0.0")
+    app = FastAPI(title="KnowledgeKeeper API", version="1.0.0", lifespan=_lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=parse_allowed_origins(settings.allowed_origins),
@@ -402,6 +429,7 @@ app = create_app()
 # Validate settings on startup
 settings.validate_for_production()
 
+
 # Serve frontend static files in production
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _FRONTEND_DIST.exists():
@@ -421,14 +449,12 @@ DOCX_MEDIA_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
 
-# How long generated documents and idle graph instances are retained. Tied to
-# the session TTL so a document outlives the session that produced it by the
-# same window.
+# How long an idle session's in-process lock is retained.
 _RETENTION_SECONDS = settings.session_ttl_hours * 3600
 
-# Sweeps are opportunistic — triggered by request handlers rather than a
-# background thread — so they are rate limited to avoid doing this work on
-# every call.
+# Sweeps run on a background timer (see _start_retention_sweeper) and also
+# opportunistically from request handlers, rate limited so the latter does
+# not do this work on every call.
 _SWEEP_INTERVAL_SECONDS = 300.0
 _last_sweep_at = 0.0
 _sweep_lock = threading.Lock()
@@ -599,15 +625,12 @@ def sweep_resources(force: bool = False) -> Dict[str, int]:
             return {}
         _last_sweep_at = now
 
-    sessions = get_session_store().sweep_expired()
-    instances = _registry.sweep_idle(_RETENTION_SECONDS)
-    documents = get_document_store().sweep_expired()
-
-    result = {
-        "sessions": sessions,
-        "graph_instances": instances,
-        "documents": documents,
-    }
+    # The retention policy: expired sessions and their transcripts, packs past
+    # their retention date, handover records past theirs. See api/retention.py.
+    result = retention.run_sweep(
+        checkpointer=get_checkpointer(), lock=session_lock, forget=_registry.remove
+    )
+    result["graph_instances"] = _registry.sweep_idle(_RETENTION_SECONDS)
     if any(result.values()):
         logger.info("resource sweep released %s", result)
     return result
@@ -727,7 +750,23 @@ def _run_generation_in_background(
                 logger.warning("could not delete transient export %s: %s", file_path, e)
 
         filename = os.path.basename(file_path)
-        get_document_store().complete_job(document_id, filename, media_type, content)
+        documents = get_document_store()
+        documents.complete_job(document_id, filename, media_type, content)
+
+        job = documents.get_job(document_id)
+        if job is None:
+            # The handover was deleted while its pack was being generated.
+            # Never email, or announce, a pack the manager has deleted.
+            logger.info(
+                "session=%s document=%s handover deleted during generation; not delivered",
+                session_id, document_id,
+            )
+            return
+
+        # The dashboard record lives as long as its pack.
+        stage1_id = get_session_store().get_linked_session(session_id)
+        if stage1_id and job.get("expires_at"):
+            get_account_store().extend_handover(stage1_id, job["expires_at"])
 
         on_document_generated(session_id, document_id, filename)
 
@@ -875,6 +914,17 @@ def create_stage2(
 
     session_id = store.create_session(stage=2, metadata={"stage1_session_id": request.stage1_session_id})
     store.link_sessions(request.stage1_session_id, session_id)
+    # Keep the manager's session (and its profile) alive as long as the
+    # employee's. Each used to expire 72h after its own creation, so an
+    # employee who finished more than 72h after the manager started setup got
+    # no pack at all: the profile had already been swept.
+    now = time.time()
+    store.extend_session(request.stage1_session_id, now + settings.session_ttl_hours * 3600)
+    accounts = get_account_store()
+    accounts.set_handover_stage2(request.stage1_session_id, session_id)
+    # The dashboard's name for the handover once the profile itself is gone.
+    accounts.set_handover_title(request.stage1_session_id, profile.job_title)
+    accounts.extend_handover(request.stage1_session_id, now + default_handover_window())
 
     instance = _registry.create_stage2(session_id)
 
@@ -1100,6 +1150,30 @@ def download_document(document_id: str):
 # ---- Manager accounts and dashboard ----
 
 app.include_router(account_router)
+
+
+@app.delete("/api/handovers/{stage1_session_id}", status_code=204)
+def delete_handover(stage1_session_id: str, account: TokenClaims = Depends(require_account)):
+    """Delete a handover and everything under it, now.
+
+    Both interview sessions and their transcripts, the profile, every
+    generated pack and the dashboard record. 404 for a handover that is not
+    the caller's, exactly as for one that does not exist. The employee's link
+    stops working immediately. Copies already emailed to recipients are not
+    affected — the dashboard says so before asking for confirmation.
+    """
+    row = get_account_store().get_handover(stage1_session_id)
+    if row is None or row["manager_id"] != account.manager_id:
+        raise HTTPException(status_code=404, detail="Handover not found")
+    retention.purge_handover(
+        stage1_session_id,
+        row.get("stage2_session_id"),
+        checkpointer=get_checkpointer(),
+        lock=session_lock,
+        forget=_registry.remove,
+    )
+    logger.info("manager=%s deleted handover=%s", account.manager_id, stage1_session_id)
+    return Response(status_code=204)
 
 
 # ---- SPA Fallback (must be last) ----

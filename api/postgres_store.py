@@ -85,6 +85,18 @@ BEGIN
             ADD COLUMN IF NOT EXISTS delivered_to    TEXT[];
     END IF;
 END $$;
+-- Retention: a finished pack is kept until expires_at (set on completion).
+-- NULL means unfinished or failed, which expire with the interview instead.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'kk_documents' AND column_name = 'expires_at'
+    ) THEN
+        ALTER TABLE kk_documents ADD COLUMN IF NOT EXISTS expires_at DOUBLE PRECISION;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS kk_generation_errors (
     session_id  TEXT PRIMARY KEY,
@@ -117,6 +129,22 @@ CREATE TABLE IF NOT EXISTS kk_handovers (
     created_at        DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS kk_handovers_manager ON kk_handovers (manager_id, created_at);
+-- Retention: stage2_session_id survives the session links being swept, so an
+-- archived pack can still be found; retain_until is when the whole handover
+-- record (and anything left under it) is deleted.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'kk_handovers' AND column_name = 'retain_until'
+    ) THEN
+        ALTER TABLE kk_handovers
+            ADD COLUMN IF NOT EXISTS stage2_session_id TEXT,
+            ADD COLUMN IF NOT EXISTS retain_until      DOUBLE PRECISION;
+        CREATE INDEX IF NOT EXISTS kk_handovers_retain_until ON kk_handovers (retain_until);
+    END IF;
+END $$;
 """
 
 
@@ -176,6 +204,26 @@ def setup_checkpointer(saver: Any, pool: ConnectionPool, timeout: float = 120.0)
             saver.setup()
         finally:
             conn.execute("SELECT pg_advisory_unlock(%s)", (CHECKPOINTER_LOCK_KEY,))
+
+
+def orphaned_transcript_ids(pool: ConnectionPool, limit: int = 500) -> List[str]:
+    """Thread ids in LangGraph's checkpoint table with no session behind them.
+
+    Reads the checkpointer's own `checkpoints` table — the one place this code
+    touches LangGraph internals, and read-only: deletion goes through the
+    public delete_thread(). A session row is always written before its first
+    checkpoint, so an in-flight interview is never mistaken for an orphan.
+    """
+    with pool.connection() as conn:
+        if conn.execute("SELECT to_regclass('checkpoints')").fetchone()[0] is None:
+            return []
+        rows = conn.execute(
+            "SELECT DISTINCT c.thread_id FROM checkpoints c "
+            "WHERE NOT EXISTS (SELECT 1 FROM kk_sessions s WHERE s.session_id = c.thread_id) "
+            "LIMIT %s",
+            (limit,),
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 _shared_pool: Optional[ConnectionPool] = None
@@ -322,7 +370,7 @@ class PostgresSessionStore:
 
     # -- expiry ----------------------------------------------------------
 
-    def sweep_expired(self) -> int:
+    def sweep_expired_ids(self) -> List[str]:
         """Drop expired sessions with their links and profiles.
 
         Mirrors InMemorySessionStore.sweep_expired, including removing both
@@ -337,7 +385,7 @@ class PostgresSessionStore:
                 ).fetchall()
             ]
             if not expired:
-                return 0
+                return []
 
             linked = [
                 r[0]
@@ -354,7 +402,30 @@ class PostgresSessionStore:
                 (expired + linked,),
             )
 
-        return len(expired)
+        return expired
+
+    def sweep_expired(self) -> int:
+        return len(self.sweep_expired_ids())
+
+    def extend_session(self, session_id: str, until: float) -> None:
+        """Keep a live session until at least `until`. Never shortens it."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE kk_sessions SET expires_at = GREATEST(expires_at, %s) "
+                "WHERE session_id = %s AND expires_at > %s",
+                (until, session_id, time.time()),
+            )
+
+    def delete_session(self, session_id: str) -> None:
+        """Remove a session, its profile and both directions of its link."""
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("DELETE FROM kk_sessions WHERE session_id = %s", (session_id,))
+                conn.execute("DELETE FROM kk_profiles WHERE session_id = %s", (session_id,))
+                conn.execute(
+                    "DELETE FROM kk_session_links WHERE session_id = %s OR linked_id = %s",
+                    (session_id, session_id),
+                )
 
     def close(self) -> None:
         # Only close a pool we created. The shared one outlives any single
@@ -415,12 +486,22 @@ class PostgresDocumentStore:
     """DocumentStore backed by Postgres. See the protocol in document_store."""
 
     def __init__(self, conninfo: Optional[str] = None, ttl_hours: float | None = None,
-                 pool: Optional[ConnectionPool] = None):
+                 pool: Optional[ConnectionPool] = None, retention_days: float | None = None):
         self._ttl_seconds = (ttl_hours or settings.session_ttl_hours) * 3600
+        self._retention_seconds = (retention_days or settings.document_retention_days) * 86400
         self._owns_pool = pool is None and bool(conninfo)
         self._pool = _pool_for(conninfo, pool, settings.db_pool_size)
         with self._pool.connection() as conn:
             apply_schema(conn)
+            # Packs finished before retention existed have no expires_at and
+            # would otherwise be swept on the old 72-hour rule. Give them the
+            # retention period from when they were made. Idempotent: matches
+            # nothing once every finished pack has a date.
+            conn.execute(
+                "UPDATE kk_documents SET expires_at = created_at + %s "
+                "WHERE status = %s AND expires_at IS NULL",
+                (self._retention_seconds, COMPLETE),
+            )
 
     def start_job(self, document_id: str, session_id: str) -> None:
         with self._pool.connection() as conn:
@@ -437,11 +518,22 @@ class PostgresDocumentStore:
     def complete_job(self, document_id: str, filename: str, media_type: str,
                      content: bytes) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE kk_documents SET status = %s, filename = %s, media_type = %s, "
-                "content = %s, error = NULL WHERE document_id = %s",
-                (COMPLETE, filename, media_type, content, document_id),
-            )
+            with conn.transaction():
+                row = conn.execute(
+                    "UPDATE kk_documents SET status = %s, filename = %s, media_type = %s, "
+                    "content = %s, error = NULL, expires_at = %s WHERE document_id = %s "
+                    "RETURNING session_id, created_at",
+                    (COMPLETE, filename, media_type, content,
+                     time.time() + self._retention_seconds, document_id),
+                ).fetchone()
+                if row is None:
+                    return
+                # A finished pack supersedes every earlier one for the session.
+                conn.execute(
+                    "DELETE FROM kk_documents WHERE session_id = %s AND document_id <> %s "
+                    "AND created_at <= %s",
+                    (row[0], document_id, row[1]),
+                )
 
     def fail_job(self, document_id: str, error: str) -> None:
         with self._pool.connection() as conn:
@@ -462,13 +554,13 @@ class PostgresDocumentStore:
     def get_job(self, document_id: str) -> Optional[Dict[str, Any]]:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT status, error, delivery_status, delivery_error, delivered_to "
-                "FROM kk_documents WHERE document_id = %s",
+                "SELECT status, error, delivery_status, delivery_error, delivered_to, "
+                "expires_at FROM kk_documents WHERE document_id = %s",
                 (document_id,),
             ).fetchone()
         if row is None:
             return None
-        status, error, delivery_status, delivery_error, delivered_to = row
+        status, error, delivery_status, delivery_error, delivered_to, expires_at = row
         return {
             "status": status,
             "error": error,
@@ -482,6 +574,7 @@ class PostgresDocumentStore:
                 if delivery_status
                 else None
             ),
+            "expires_at": expires_at,
         }
 
     def get_content(self, document_id: str) -> Optional[tuple[str, str, bytes]]:
@@ -501,6 +594,15 @@ class PostgresDocumentStore:
             row = conn.execute(
                 "SELECT session_id FROM kk_documents WHERE document_id = %s",
                 (document_id,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def completed_document_for_session(self, session_id: str) -> Optional[str]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT document_id FROM kk_documents WHERE session_id = %s AND status = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (session_id, COMPLETE),
             ).fetchone()
         return row[0] if row else None
 
@@ -536,18 +638,23 @@ class PostgresDocumentStore:
             ).fetchone()
         return row[0] if row else None
 
+    # Finished packs expire at expires_at; unfinished or failed jobs with the
+    # interview, measured from when they started.
+    _EXPIRED = "(expires_at IS NOT NULL AND expires_at < %s) OR (expires_at IS NULL AND created_at < %s)"
+
     def sweep_expired(self) -> int:
-        cutoff = time.time() - self._ttl_seconds
+        now = time.time()
+        params = (now, now - self._ttl_seconds)
         with self._pool.connection() as conn:
             orphaned = [
                 r[0]
                 for r in conn.execute(
-                    "SELECT DISTINCT session_id FROM kk_documents WHERE created_at < %s",
-                    (cutoff,),
+                    f"SELECT DISTINCT session_id FROM kk_documents WHERE {self._EXPIRED}",
+                    params,
                 ).fetchall()
             ]
             removed = conn.execute(
-                "DELETE FROM kk_documents WHERE created_at < %s", (cutoff,)
+                f"DELETE FROM kk_documents WHERE {self._EXPIRED}", params
             ).rowcount
             if orphaned:
                 # Only for sessions left with no documents at all.
@@ -557,6 +664,16 @@ class PostgresDocumentStore:
                     (orphaned,),
                 )
         return removed
+
+    def delete_for_session(self, session_id: str) -> int:
+        with self._pool.connection() as conn:
+            removed = conn.execute(
+                "DELETE FROM kk_documents WHERE session_id = %s", (session_id,)
+            ).rowcount
+            conn.execute(
+                "DELETE FROM kk_generation_errors WHERE session_id = %s", (session_id,)
+            )
+        return removed or 0
 
     def close(self) -> None:
         # Only close a pool we created. The shared one outlives any single
@@ -632,12 +749,35 @@ class PostgresAccountStore:
             ).fetchone()
         return int(row[0])
 
-    def add_handover(self, stage1_session_id: str, manager_id: str) -> None:
+    # Rows written before retention existed have no retain_until; treat them as
+    # created_at plus the default window.
+    def _retain_until_sql(self) -> str:
+        from api.accounts import default_handover_window
+
+        return f"COALESCE(retain_until, created_at + {float(default_handover_window())})"
+
+    _HANDOVER_COLUMNS = "stage1_session_id, manager_id, title, stage2_session_id, created_at"
+
+    def _handover_row(self, row) -> Dict[str, Any]:
+        return {
+            "stage1_session_id": row[0],
+            "manager_id": row[1],
+            "title": row[2],
+            "stage2_session_id": row[3],
+            "created_at": row[4],
+            "retain_until": row[5],
+        }
+
+    def add_handover(self, stage1_session_id: str, manager_id: str,
+                     retain_until: Optional[float] = None) -> None:
+        from api.accounts import default_handover_window
+
+        now = time.time()
         with self._pool.connection() as conn:
             conn.execute(
-                "INSERT INTO kk_handovers (stage1_session_id, manager_id, created_at) "
-                "VALUES (%s, %s, %s) ON CONFLICT (stage1_session_id) DO NOTHING",
-                (stage1_session_id, manager_id, time.time()),
+                "INSERT INTO kk_handovers (stage1_session_id, manager_id, created_at, retain_until) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT (stage1_session_id) DO NOTHING",
+                (stage1_session_id, manager_id, now, retain_until or now + default_handover_window()),
             )
 
     def set_handover_title(self, stage1_session_id: str, title: str) -> None:
@@ -645,6 +785,21 @@ class PostgresAccountStore:
             conn.execute(
                 "UPDATE kk_handovers SET title = %s WHERE stage1_session_id = %s",
                 (title, stage1_session_id),
+            )
+
+    def set_handover_stage2(self, stage1_session_id: str, stage2_session_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE kk_handovers SET stage2_session_id = %s WHERE stage1_session_id = %s",
+                (stage2_session_id, stage1_session_id),
+            )
+
+    def extend_handover(self, stage1_session_id: str, until: float) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                f"UPDATE kk_handovers SET retain_until = GREATEST({self._retain_until_sql()}, %s) "
+                "WHERE stage1_session_id = %s",
+                (until, stage1_session_id),
             )
 
     def owner_of_handover(self, stage1_session_id: str) -> Optional[str]:
@@ -655,16 +810,43 @@ class PostgresAccountStore:
             ).fetchone()
         return row[0] if row else None
 
+    def get_handover(self, stage1_session_id: str) -> Optional[Dict[str, Any]]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {self._HANDOVER_COLUMNS}, {self._retain_until_sql()} "
+                "FROM kk_handovers WHERE stage1_session_id = %s",
+                (stage1_session_id,),
+            ).fetchone()
+        return self._handover_row(row) if row else None
+
+    def delete_handover(self, stage1_session_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM kk_handovers WHERE stage1_session_id = %s", (stage1_session_id,)
+            )
+
+    def expired_handovers(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {self._HANDOVER_COLUMNS}, {self._retain_until_sql()} "
+                f"FROM kk_handovers WHERE {self._retain_until_sql()} < %s",
+                (now or time.time(),),
+            ).fetchall()
+        return [self._handover_row(r) for r in rows]
+
     def list_handovers(self, manager_id: str) -> List[Dict[str, Any]]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT stage1_session_id, title, created_at FROM kk_handovers "
-                "WHERE manager_id = %s ORDER BY created_at DESC",
+                f"SELECT {self._HANDOVER_COLUMNS}, {self._retain_until_sql()} "
+                "FROM kk_handovers WHERE manager_id = %s ORDER BY created_at DESC",
                 (manager_id,),
             ).fetchall()
-        return [
-            {"stage1_session_id": r[0], "title": r[1], "created_at": r[2]} for r in rows
-        ]
+        out = []
+        for r in rows:
+            row = self._handover_row(r)
+            row.pop("manager_id")
+            out.append(row)
+        return out
 
     def sweep_expired(self) -> int:
         with self._pool.connection() as conn:

@@ -409,3 +409,77 @@ class TestTheInMemoryPathGenuinelyDoesNotSurvive:
             "result above proves nothing"
         )
         _restart()
+
+
+class TestRetentionOnPostgres:
+    """The delete and archive paths with the real stores, advisory locks and
+    PostgresSaver — the in-memory API tests cannot exercise those."""
+
+    def _seed_ready_handover(self):
+        import psycopg
+
+        from api.accounts import get_account_store
+        from api.document_store import get_document_store
+        from api.routes import get_checkpointer
+        from api.session_manager import get_session_store
+        from tests.api_client import TEST_MANAGER_ID
+
+        with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+            conn.execute("TRUNCATE kk_managers, kk_login_tokens, kk_handovers")
+
+        sessions, documents, accounts = get_session_store(), get_document_store(), get_account_store()
+        stage1 = sessions.create_session(stage=1)
+        stage2 = sessions.create_session(stage=2)
+        sessions.link_sessions(stage1, stage2)
+        accounts.add_handover(stage1, TEST_MANAGER_ID)
+        accounts.set_handover_stage2(stage1, stage2)
+        accounts.set_handover_title(stage1, "Finance Manager")
+        documents.start_job("pg-pack", stage2)
+        documents.complete_job("pg-pack", "pg-pack.docx", "application/x-test", b"PACK")
+
+        # A real transcript for each session.
+        saver = get_checkpointer()
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        for sid in (stage1, stage2):
+            saver.put({"configurable": {"thread_id": sid, "checkpoint_ns": ""}},
+                      empty_checkpoint(), {"source": "input", "step": -1}, {})
+        return stage1, stage2, saver
+
+    def test_delete_purges_every_table(self, durable):
+        import psycopg
+
+        stage1, stage2, saver = self._seed_ready_handover()
+        res = durable.delete(f"/api/handovers/{stage1}")
+        assert res.status_code == 204
+
+        with psycopg.connect(TEST_DATABASE_URL) as conn:
+            for table, column in [
+                ("kk_sessions", "session_id"), ("kk_profiles", "session_id"),
+                ("kk_session_links", "session_id"), ("kk_session_links", "linked_id"),
+                ("kk_documents", "session_id"), ("kk_handovers", "stage1_session_id"),
+                ("checkpoints", "thread_id"), ("checkpoint_blobs", "thread_id"),
+                ("checkpoint_writes", "thread_id"),
+            ]:
+                count = conn.execute(
+                    f"SELECT count(*) FROM {table} WHERE {column} = ANY(%s)", ([stage1, stage2],)
+                ).fetchone()[0]
+                assert count == 0, f"{table}.{column} still holds the deleted handover"
+
+    def test_an_archived_pack_downloads_after_the_sessions_are_swept(self, durable):
+        import psycopg
+
+        import api.routes as routes_mod
+
+        stage1, stage2, saver = self._seed_ready_handover()
+        with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+            conn.execute(
+                "UPDATE kk_sessions SET expires_at = 0 WHERE session_id = ANY(%s)", ([stage1, stage2],)
+            )
+        result = routes_mod.sweep_resources(force=True)
+        assert result["sessions"] == 2
+        assert saver.get_tuple({"configurable": {"thread_id": stage2}}) is None
+
+        listed = durable.get("/api/handovers").json()
+        assert listed[0]["status"] == "archived"
+        assert durable.get(f"/api/handovers/{stage1}/document").content == b"PACK"

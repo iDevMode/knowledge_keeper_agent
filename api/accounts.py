@@ -33,6 +33,16 @@ def new_login_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def default_handover_window() -> float:
+    """Seconds a handover record lives before any pack exists.
+
+    As long as its interview sessions can, plus a period during which an
+    abandoned or expired handover still shows on the dashboard so the manager
+    can see what happened to it.
+    """
+    return settings.session_ttl_hours * 3600 + settings.expired_handover_visible_days * 86400
+
+
 @runtime_checkable
 class AccountStore(Protocol):
     def get_or_create_manager(self, email: str) -> str: ...
@@ -40,9 +50,15 @@ class AccountStore(Protocol):
     def create_login_token(self, email: str, ttl_seconds: float) -> str: ...
     def consume_login_token(self, raw_token: str) -> Optional[str]: ...
     def count_login_tokens_since(self, email: str, since: float) -> int: ...
-    def add_handover(self, stage1_session_id: str, manager_id: str) -> None: ...
+    def add_handover(self, stage1_session_id: str, manager_id: str,
+                     retain_until: Optional[float] = None) -> None: ...
     def set_handover_title(self, stage1_session_id: str, title: str) -> None: ...
+    def set_handover_stage2(self, stage1_session_id: str, stage2_session_id: str) -> None: ...
+    def extend_handover(self, stage1_session_id: str, until: float) -> None: ...
     def owner_of_handover(self, stage1_session_id: str) -> Optional[str]: ...
+    def get_handover(self, stage1_session_id: str) -> Optional[Dict[str, Any]]: ...
+    def delete_handover(self, stage1_session_id: str) -> None: ...
+    def expired_handovers(self, now: Optional[float] = None) -> List[Dict[str, Any]]: ...
     def list_handovers(self, manager_id: str) -> List[Dict[str, Any]]: ...
     def sweep_expired(self) -> int: ...
 
@@ -102,13 +118,17 @@ class InMemoryAccountStore:
             if r["email"] == email and r["created_at"] >= since
         )
 
-    def add_handover(self, stage1_session_id: str, manager_id: str) -> None:
+    def add_handover(self, stage1_session_id: str, manager_id: str,
+                     retain_until: Optional[float] = None) -> None:
+        now = time.time()
         with self._lock:
             self._handovers.setdefault(stage1_session_id, {
                 "stage1_session_id": stage1_session_id,
                 "manager_id": manager_id,
                 "title": None,
-                "created_at": time.time(),
+                "stage2_session_id": None,
+                "created_at": now,
+                "retain_until": retain_until or now + default_handover_window(),
             })
 
     def set_handover_title(self, stage1_session_id: str, title: str) -> None:
@@ -117,9 +137,34 @@ class InMemoryAccountStore:
             if record is not None:
                 record["title"] = title
 
+    def set_handover_stage2(self, stage1_session_id: str, stage2_session_id: str) -> None:
+        with self._lock:
+            record = self._handovers.get(stage1_session_id)
+            if record is not None:
+                record["stage2_session_id"] = stage2_session_id
+
+    def extend_handover(self, stage1_session_id: str, until: float) -> None:
+        """Keep the record until at least `until`. Never shortens it."""
+        with self._lock:
+            record = self._handovers.get(stage1_session_id)
+            if record is not None:
+                record["retain_until"] = max(record["retain_until"], until)
+
     def owner_of_handover(self, stage1_session_id: str) -> Optional[str]:
         record = self._handovers.get(stage1_session_id)
         return record["manager_id"] if record else None
+
+    def get_handover(self, stage1_session_id: str) -> Optional[Dict[str, Any]]:
+        record = self._handovers.get(stage1_session_id)
+        return dict(record) if record else None
+
+    def delete_handover(self, stage1_session_id: str) -> None:
+        with self._lock:
+            self._handovers.pop(stage1_session_id, None)
+
+    def expired_handovers(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        now = now or time.time()
+        return [dict(r) for r in self._handovers.values() if r["retain_until"] < now]
 
     def list_handovers(self, manager_id: str) -> List[Dict[str, Any]]:
         rows = [dict(r) for r in self._handovers.values() if r["manager_id"] == manager_id]

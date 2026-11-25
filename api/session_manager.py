@@ -2,7 +2,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from models.role_intelligence_profile import RoleIntelligenceProfile
 from config.settings import settings
@@ -20,6 +20,9 @@ class SessionStore(Protocol):
     def store_profile(self, session_id: str, profile: RoleIntelligenceProfile) -> None: ...
     def get_profile(self, session_id: str) -> Optional[RoleIntelligenceProfile]: ...
     def sweep_expired(self) -> int: ...
+    def sweep_expired_ids(self) -> List[str]: ...
+    def extend_session(self, session_id: str, until: float) -> None: ...
+    def delete_session(self, session_id: str) -> None: ...
 
 
 class InMemorySessionStore:
@@ -33,7 +36,8 @@ class InMemorySessionStore:
         session = self._sessions.get(session_id)
         if not session:
             return True
-        return time.time() - session["_created_at"] > self._ttl_seconds
+        expires_at = session.get("_expires_at", session["_created_at"] + self._ttl_seconds)
+        return time.time() > expires_at
 
     def create_session(self, stage: int, metadata: Dict[str, Any] | None = None) -> str:
         session_id = str(uuid.uuid4())
@@ -72,25 +76,36 @@ class InMemorySessionStore:
             return None
         return RoleIntelligenceProfile.model_validate(data)
 
-    def sweep_expired(self) -> int:
-        """Drop expired sessions and their links and profiles.
+    def extend_session(self, session_id: str, until: float) -> None:
+        """Keep a live session until at least `until`. Never shortens it."""
+        session = self._sessions.get(session_id)
+        if session and not self._is_expired(session_id):
+            current = session.get("_expires_at", session["_created_at"] + self._ttl_seconds)
+            session["_expires_at"] = max(current, until)
+
+    def delete_session(self, session_id: str) -> None:
+        """Remove a session, its profile and both directions of its link."""
+        self._sessions.pop(session_id, None)
+        self._profiles.pop(session_id, None)
+        linked = self._links.pop(session_id, None)
+        if linked is not None and self._links.get(linked) == session_id:
+            self._links.pop(linked, None)
+
+    def sweep_expired_ids(self) -> List[str]:
+        """Drop expired sessions with their links and profiles; return their ids.
 
         Expiry was previously only applied lazily on next access, so a session
         that was abandoned — the common case for an interview someone never
-        finishes — stayed resident forever along with its profile.
-
-        Returns the number of sessions removed.
+        finishes — stayed resident forever along with its profile. The ids are
+        returned so the caller can delete the transcripts held elsewhere.
         """
         expired = [sid for sid in list(self._sessions) if self._is_expired(sid)]
-
         for session_id in expired:
-            self._sessions.pop(session_id, None)
-            self._profiles.pop(session_id, None)
-            linked = self._links.pop(session_id, None)
-            if linked is not None:
-                self._links.pop(linked, None)
+            self.delete_session(session_id)
+        return expired
 
-        return len(expired)
+    def sweep_expired(self) -> int:
+        return len(self.sweep_expired_ids())
 
 
 _store: SessionStore | None = None

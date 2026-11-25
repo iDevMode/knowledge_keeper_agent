@@ -138,6 +138,31 @@ export async function listHandovers() {
 }
 
 /**
+ * Download the newest pack for a handover. Works for the whole retention
+ * period, after the interview sessions are gone. Fetched with the account
+ * token in a header and saved from a blob, so no token goes in a URL.
+ */
+export async function downloadHandoverPack(stage1SessionId) {
+  const res = await accountRequest(`/handovers/${stage1SessionId}/document`)
+  const blob = await res.blob()
+  const disposition = res.headers.get('Content-Disposition') || ''
+  const match = disposition.match(/filename="([^"]+)"/)
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = match ? match[1] : 'Handover pack.docx'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+
+/** Permanently delete a handover: interviews, transcripts and every pack. */
+export async function deleteHandover(stage1SessionId) {
+  await accountRequest(`/handovers/${stage1SessionId}`, { method: 'DELETE' })
+}
+
+/**
  * Exchange the account token for a manager token for one handover, and keep it
  * where the Stage 1 page and the completion panel expect to find it.
  */
