@@ -107,6 +107,45 @@ class TestJobLifecycle:
         assert store.get_content("doc-1")[2] == blob
 
 
+class TestDelivery:
+    def test_a_new_job_has_no_delivery(self, store):
+        store.start_job("doc-1", "session-1")
+        assert store.get_job("doc-1")["delivery"] is None
+
+    def test_a_sent_delivery_round_trips(self, store):
+        store.start_job("doc-1", "session-1")
+        store.complete_job("doc-1", "pack.docx", DOCX, PACK)
+        store.record_delivery("doc-1", "sent", ["hr@acme.co.uk", "new@acme.co.uk"], None)
+
+        assert store.get_job("doc-1")["delivery"] == {
+            "status": "sent",
+            "recipients": ["hr@acme.co.uk", "new@acme.co.uk"],
+            "error": None,
+        }
+
+    def test_a_skipped_delivery_keeps_its_reason(self, store):
+        store.start_job("doc-1", "session-1")
+        store.record_delivery("doc-1", "skipped", [], "No recipient email addresses")
+
+        assert store.get_job("doc-1")["delivery"] == {
+            "status": "skipped",
+            "recipients": [],
+            "error": "No recipient email addresses",
+        }
+
+    def test_recording_delivery_leaves_the_document_intact(self, store):
+        store.start_job("doc-1", "session-1")
+        store.complete_job("doc-1", "pack.docx", DOCX, PACK)
+        store.record_delivery("doc-1", "failed", ["hr@acme.co.uk"], "SendGrid returned 500")
+
+        assert store.get_job("doc-1")["status"] == COMPLETE
+        assert store.get_content("doc-1") == ("pack.docx", DOCX, PACK)
+
+    def test_delivery_for_an_unknown_document_is_ignored(self, store):
+        store.record_delivery("nope", "sent", ["hr@acme.co.uk"], None)
+        assert store.get_job("nope") is None
+
+
 class TestOwnership:
     def test_a_document_knows_its_session(self, store):
         store.start_job("doc-1", "session-1")

@@ -449,6 +449,13 @@ def profile_review_node(state: Stage1State) -> Dict[str, Any]:
     # Format list fields
     tools = ", ".join(data.get("key_tools", [])) if data.get("key_tools") else "None listed"
     recipients = ", ".join(data.get("recipients", [])) if data.get("recipients") else "None listed"
+    # Shown so the manager confirms the exact addresses before a pack containing
+    # a Risk Summary is emailed to them.
+    recipient_emails = (
+        ", ".join(data["recipient_emails"])
+        if data.get("recipient_emails")
+        else "None given — the pack will not be emailed"
+    )
     supporting = ", ".join(data.get("supporting_categories", [])) if data.get("supporting_categories") else "None"
 
     review_msg = PROFILE_REVIEW_MESSAGE_TEMPLATE.format(
@@ -480,6 +487,7 @@ def profile_review_node(state: Stage1State) -> Dict[str, Any]:
         supporting_categories=supporting,
         document_destination=data.get("document_destination", ""),
         recipients=recipients,
+        recipient_emails=recipient_emails,
         confidential_sections=data.get("confidential_sections") or "None specified",
         existing_template=data.get("existing_template") or "None — will generate best-practice structure",
         departure_type=data.get("departure_type", ""),

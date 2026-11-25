@@ -122,6 +122,9 @@ The Stage 2 link is *designed to be forwarded to the departing employee*, so a c
 **Why does the manager create the employee's session?**
 Minting an employee token requires proving you are the manager. The employee's browser therefore no longer creates the Stage 2 session — it opens a link the manager generated, carrying a token scoped to that session alone.
 
+**How is the handover pack emailed?**
+Through SendGrid (`api/mailer.py`, `api/delivery.py`). The pack produced automatically when Stage 2 completes is emailed as an attachment to `recipient_emails` from the confirmed profile; a manager-triggered regenerate only emails if `send_email` is set. The manager sees those exact addresses in the profile review before confirming, because the pack carries a Risk Summary about a named employee. Each recipient gets their own SendGrid personalization so nobody sees who else received it, and click tracking is off. Delivery runs after the document is stored and never fails generation — the outcome (sent / skipped / failed, with a reason) is recorded on the document and shown to the manager only. Without `SENDGRID_API_KEY` the app logs instead of sending. Tests never send email: `tests/conftest.py` swaps in an in-memory outbox.
+
 ---
 
 ## USEFUL COMMANDS

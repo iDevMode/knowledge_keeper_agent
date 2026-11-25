@@ -50,6 +50,10 @@ class RoleIntelligenceProfile(BaseModel):
     # Output Preferences
     document_destination: str
     recipients: List[str]
+    # Addresses the finished handover pack is emailed to. Separate from
+    # `recipients`, which holds who they are ("HR Manager") and predates email
+    # delivery — older profiles validate without it.
+    recipient_emails: List[str] = []
     confidential_sections: Optional[str] = None
     existing_template: Optional[str] = None
 

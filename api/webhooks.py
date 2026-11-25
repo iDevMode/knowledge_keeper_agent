@@ -22,7 +22,8 @@ def on_stage2_complete(session_id: str) -> None:
 def on_document_generated(session_id: str, document_id: str, file_path: str) -> None:
     """Called when Stage 3 document has been generated and exported.
 
-    Phase 2: email delivery to recipients, upload to Notion/Confluence, etc.
+    Email delivery to recipients is handled by api.delivery, called from the
+    generation thread. Phase 2: upload to Notion/Confluence, etc.
     """
     logger.info(
         "session=%s webhook=document_generated document_id=%s path=%s",

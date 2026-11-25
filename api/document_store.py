@@ -19,7 +19,7 @@ SessionStore. One contract suite covers both.
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from config.settings import settings
 
@@ -36,6 +36,8 @@ class DocumentStore(Protocol):
     def complete_job(self, document_id: str, filename: str, media_type: str,
                      content: bytes) -> None: ...
     def fail_job(self, document_id: str, error: str) -> None: ...
+    def record_delivery(self, document_id: str, status: str, recipients: List[str],
+                        error: Optional[str]) -> None: ...
     def get_job(self, document_id: str) -> Optional[Dict[str, Any]]: ...
     def get_content(self, document_id: str) -> Optional[tuple[str, str, bytes]]: ...
     def owner_of(self, document_id: str) -> Optional[str]: ...
@@ -65,6 +67,7 @@ class InMemoryDocumentStore:
                 "filename": None,
                 "media_type": None,
                 "content": None,
+                "delivery": None,
                 "created_at": time.time(),
             }
             self._session_document[session_id] = document_id
@@ -88,6 +91,18 @@ class InMemoryDocumentStore:
                 return
             record.update(status=FAILED, error=error)
 
+    def record_delivery(self, document_id: str, status: str, recipients: List[str],
+                        error: Optional[str]) -> None:
+        with self._lock:
+            record = self._documents.get(document_id)
+            if record is None:
+                return
+            record["delivery"] = {
+                "status": status,
+                "recipients": list(recipients),
+                "error": error,
+            }
+
     def get_job(self, document_id: str) -> Optional[Dict[str, Any]]:
         record = self._documents.get(document_id)
         if record is None:
@@ -98,6 +113,7 @@ class InMemoryDocumentStore:
             "download_url": (
                 f"/api/documents/{document_id}" if record["status"] == COMPLETE else None
             ),
+            "delivery": dict(record["delivery"]) if record.get("delivery") else None,
         }
 
     def get_content(self, document_id: str) -> Optional[tuple[str, str, bytes]]:

@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -69,6 +69,22 @@ CREATE TABLE IF NOT EXISTS kk_documents (
 );
 CREATE INDEX IF NOT EXISTS kk_documents_session_id ON kk_documents (session_id);
 CREATE INDEX IF NOT EXISTS kk_documents_created_at ON kk_documents (created_at);
+-- Email delivery of the pack, added after the table shipped. Checked first
+-- because ALTER TABLE takes an exclusive lock on kk_documents even when the
+-- columns already exist, and this runs on every worker start.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'kk_documents' AND column_name = 'delivered_to'
+    ) THEN
+        ALTER TABLE kk_documents
+            ADD COLUMN IF NOT EXISTS delivery_status TEXT,
+            ADD COLUMN IF NOT EXISTS delivery_error  TEXT,
+            ADD COLUMN IF NOT EXISTS delivered_to    TEXT[];
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS kk_generation_errors (
     session_id  TEXT PRIMARY KEY,
@@ -407,19 +423,38 @@ class PostgresDocumentStore:
                 (FAILED, error, document_id),
             )
 
+    def record_delivery(self, document_id: str, status: str, recipients: List[str],
+                        error: Optional[str]) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE kk_documents SET delivery_status = %s, delivery_error = %s, "
+                "delivered_to = %s WHERE document_id = %s",
+                (status, error, list(recipients), document_id),
+            )
+
     def get_job(self, document_id: str) -> Optional[Dict[str, Any]]:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT status, error FROM kk_documents WHERE document_id = %s",
+                "SELECT status, error, delivery_status, delivery_error, delivered_to "
+                "FROM kk_documents WHERE document_id = %s",
                 (document_id,),
             ).fetchone()
         if row is None:
             return None
-        status, error = row
+        status, error, delivery_status, delivery_error, delivered_to = row
         return {
             "status": status,
             "error": error,
             "download_url": f"/api/documents/{document_id}" if status == COMPLETE else None,
+            "delivery": (
+                {
+                    "status": delivery_status,
+                    "recipients": list(delivered_to or []),
+                    "error": delivery_error,
+                }
+                if delivery_status
+                else None
+            ),
         }
 
     def get_content(self, document_id: str) -> Optional[tuple[str, str, bytes]]:

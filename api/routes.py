@@ -31,6 +31,7 @@ from api.auth import (
     verify_token,
 )
 from api import llm_errors
+from api.delivery import deliver_handover_pack
 from api.document_store import get_document_store
 from api.session_manager import get_session_store
 from api.webhooks import on_document_generated, on_stage1_complete, on_stage2_complete
@@ -51,6 +52,14 @@ class SendMessageRequest(BaseModel):
 
 class GenerateDocumentRequest(BaseModel):
     format: str = Field(default="docx", pattern=r"^(docx|pdf)$")
+    # A manual regenerate does not email recipients unless asked — they already
+    # received the pack produced when the employee finished.
+    send_email: bool = False
+
+class DeliveryInfo(BaseModel):
+    status: str  # "sent" | "skipped" | "failed"
+    recipients: list[str] = []
+    error: Optional[str] = None
 
 class SessionCreatedResponse(BaseModel):
     session_id: str
@@ -84,6 +93,8 @@ class SessionStatusResponse(BaseModel):
     # Why no document exists, for the manager only. Otherwise a Stage 3 failure
     # leaves them watching "preparing the handover pack..." indefinitely.
     generation_error: Optional[str] = None
+    # Whether the pack was emailed, to whom, or why not. Manager only.
+    delivery: Optional[DeliveryInfo] = None
     # The employee's session is now created by the manager, so the employee
     # never sees the creation response that carried the opening question. They
     # pick it up here when they open their link, which also restores the last
@@ -100,6 +111,7 @@ class GenerationStatusResponse(BaseModel):
     status: str  # "generating" | "complete" | "failed"
     download_url: Optional[str] = None
     error: Optional[str] = None
+    delivery: Optional[DeliveryInfo] = None
 
 
 # ---- Checkpointer ----
@@ -641,7 +653,7 @@ def _build_generation_request(session_id: str) -> tuple[GenerationRequest, Any]:
     return gen_request, profile
 
 
-def _start_generation(session_id: str, output_format: str) -> str:
+def _start_generation(session_id: str, output_format: str, send_email: bool = False) -> str:
     """Kick off generation in the background and return the new document id.
 
     Shared by the manager-triggered endpoint and the automatic trigger that fires
@@ -654,7 +666,7 @@ def _start_generation(session_id: str, output_format: str) -> str:
 
     thread = threading.Thread(
         target=_run_generation_in_background,
-        args=(document_id, session_id, gen_request, profile, output_format),
+        args=(document_id, session_id, gen_request, profile, output_format, send_email),
         daemon=True,
     )
     thread.start()
@@ -672,6 +684,7 @@ def _run_generation_in_background(
     gen_request: GenerationRequest,
     profile: Any,
     output_format: str,
+    send_email: bool = False,
 ):
     """Run document generation in a background thread."""
     try:
@@ -712,6 +725,13 @@ def _run_generation_in_background(
         get_document_store().complete_job(document_id, filename, media_type, content)
 
         on_document_generated(session_id, document_id, filename)
+
+        if send_email:
+            # After complete_job, so the pack is downloadable whatever happens
+            # here; deliver_handover_pack records failures rather than raising.
+            deliver_handover_pack(
+                session_id, document_id, profile, filename, media_type, content
+            )
         logger.info(
             "session=%s document=%s format=%s bytes=%d generation=complete",
             session_id, document_id, output_format, len(content),
@@ -926,7 +946,7 @@ def send_message(session_id: str, request: SendMessageRequest):
         # The document id is deliberately NOT returned here: this response goes
         # to the employee. The manager picks it up from session status.
         try:
-            _start_generation(session_id, settings.default_output_format)
+            _start_generation(session_id, settings.default_output_format, send_email=True)
         except GenerationNotReady as e:
             logger.error("session=%s auto-generation skipped: %s", session_id, e)
             get_document_store().set_generation_error(session_id, str(e))
@@ -966,6 +986,10 @@ def get_session_status(
         documents = get_document_store()
         response.document_id = documents.document_for_session(session_id)
         response.generation_error = documents.get_generation_error(session_id)
+        if response.document_id:
+            job = documents.get_job(response.document_id)
+            if job and job.get("delivery"):
+                response.delivery = DeliveryInfo(**job["delivery"])
 
     if instance:
         snapshot = instance.graph.get_state(instance.config)
@@ -994,7 +1018,11 @@ def generate_document_endpoint(session_id: str, request: GenerateDocumentRequest
     manager-driven re-run rather than the only route to a document.
     """
     try:
-        document_id = _start_generation(session_id, request.format or settings.default_output_format)
+        document_id = _start_generation(
+            session_id,
+            request.format or settings.default_output_format,
+            send_email=request.send_email,
+        )
     except GenerationNotReady as e:
         detail = str(e)
         status_code = 404 if "not found" in detail.lower() else 400
@@ -1023,6 +1051,7 @@ def get_generation_status(document_id: str):
         status=job["status"],
         download_url=job.get("download_url"),
         error=job.get("error"),
+        delivery=DeliveryInfo(**job["delivery"]) if job.get("delivery") else None,
     )
 
 
