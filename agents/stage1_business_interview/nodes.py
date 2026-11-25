@@ -3,7 +3,6 @@ import logging
 import re
 from typing import Any, Dict, List
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
@@ -30,26 +29,20 @@ from config.constants import (
     STAGE1_BLOCKS,
     STAGE1_BLOCK_QUESTION_COUNTS,
 )
-from config.settings import settings
+from config import llm_provider
 from models.role_intelligence_profile import RoleIntelligenceProfile
 
 logger = logging.getLogger(__name__)
 
 
-def _get_primary_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.primary_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=2048,
-    )
+def _get_primary_llm():
+    """The Stage 1 interview model. Kept as a patch point for tests."""
+    return llm_provider.get_primary_llm(max_tokens=2048)
 
 
-def _get_classifier_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.classifier_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=512,
-    )
+def _get_classifier_llm():
+    """The Stage 1 classifier model. Kept as a patch point for tests."""
+    return llm_provider.get_classifier_llm(max_tokens=512)
 
 
 def _single_question_or_retry(llm, messages, response_text: str, session_id: str) -> str:

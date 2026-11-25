@@ -6,6 +6,7 @@ import anthropic
 from langchain_core.messages import BaseMessage
 
 from agents.stage3_document_generation.prompts import STAGE3_SYSTEM_PROMPT, build_context_block
+from config import llm_provider
 from config.settings import settings
 from models.risk_flags import RiskFlag
 from models.role_intelligence_profile import RoleIntelligenceProfile
@@ -65,11 +66,8 @@ class GenerationTruncatedError(RuntimeError):
 
 
 def _get_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(
-        api_key=settings.anthropic_api_key,
-        timeout=600.0,
-        max_retries=3,
-    )
+    """The Stage 3 synthesis client. Kept as a patch point for tests."""
+    return llm_provider.get_synthesis_client()
 
 
 _COMPLETE_STOP_REASONS = {"end_turn", "stop_sequence"}

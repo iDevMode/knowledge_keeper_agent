@@ -22,6 +22,7 @@ python-docx>=1.1.0
 
 # Utilities
 httpx>=0.27.0  # SendGrid API calls
+pyyaml>=6.0  # interview objective bank (evals; Stage 2 v2)
 python-dotenv>=1.0.0
 
 # Testing

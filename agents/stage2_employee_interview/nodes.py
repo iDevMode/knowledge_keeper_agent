@@ -1,7 +1,6 @@
 import logging
 from typing import Any, Dict
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents import answers as answer_store
@@ -30,27 +29,21 @@ from config.constants import (
     BlockDepth,
     KnowledgeBlock,
 )
-from config.settings import settings
+from config import llm_provider
 from models.knowledge_blocks import determine_block_order_and_depth
 from models.risk_flags import RiskFlag
 
 logger = logging.getLogger(__name__)
 
 
-def _get_primary_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.interviewer_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=2048,
-    )
+def _get_primary_llm():
+    """The Stage 2 interviewer model. Kept as a patch point for tests."""
+    return llm_provider.get_interviewer_llm(max_tokens=2048)
 
 
-def _get_classifier_llm() -> ChatAnthropic:
-    return ChatAnthropic(
-        model=settings.analyst_model,
-        api_key=settings.anthropic_api_key,
-        max_tokens=512,
-    )
+def _get_classifier_llm():
+    """The Stage 2 analyst model (follow-up and risk). Kept as a patch point."""
+    return llm_provider.get_analyst_llm(max_tokens=512)
 
 
 def _single_question_or_retry(llm, messages, response_text: str, session_id: str) -> str:
