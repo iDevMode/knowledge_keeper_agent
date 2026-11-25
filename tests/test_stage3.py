@@ -317,9 +317,61 @@ class TestDocumentGenerator:
 
         assert mock_stream.call_count == 2
 
-    def test_max_tokens_is_12000(self):
+    def test_max_tokens_leaves_room_for_a_full_pack(self):
+        """12,000 tokens truncated detailed packs mid-section."""
         from agents.stage3_document_generation.generator import _MAX_TOKENS
-        assert _MAX_TOKENS == 12000
+        assert _MAX_TOKENS >= 32000
+
+
+def _fake_stream_client(chunks, stop_reason):
+    """An Anthropic client whose messages.stream yields `chunks` then stops."""
+    stream = MagicMock()
+    stream.text_stream = iter(chunks)
+    stream.get_final_message.return_value = MagicMock(stop_reason=stop_reason)
+    context = MagicMock()
+    context.__enter__.return_value = stream
+    context.__exit__.return_value = False
+    client = MagicMock()
+    client.messages.stream.return_value = context
+    return client
+
+
+class TestGenerationStopReason:
+    """A pack cut off by the output limit can still carry every section marker,
+    so the structural check alone would pass it — and it would be emailed."""
+
+    def test_finished_generation_returns_the_text(self):
+        from agents.stage3_document_generation.generator import _stream_generation
+
+        client = _fake_stream_client(["### SECTION: ", "Document Header"], "end_turn")
+        assert _stream_generation(client, "sys", "ctx") == "### SECTION: Document Header"
+
+    @pytest.mark.parametrize("reason", ["max_tokens", "refusal", "model_context_window_exceeded"])
+    def test_early_stop_raises_a_clear_error(self, reason):
+        from agents.stage3_document_generation.generator import (
+            GenerationTruncatedError,
+            _stream_generation,
+        )
+
+        client = _fake_stream_client([_build_valid_markdown()], reason)
+        with pytest.raises(GenerationTruncatedError, match=reason):
+            _stream_generation(client, "sys", "ctx")
+
+    def test_truncation_fails_the_generation_rather_than_retrying_silently(self):
+        from agents.stage3_document_generation import generator
+
+        client = _fake_stream_client([_build_valid_markdown()], "max_tokens")
+        with patch.object(generator, "_get_client", return_value=client):
+            with pytest.raises(generator.GenerationTruncatedError):
+                generate_document(_make_generation_request("process_heavy"))
+
+    def test_generation_uses_the_synthesis_model(self):
+        from agents.stage3_document_generation.generator import _stream_generation
+        from config.settings import settings
+
+        client = _fake_stream_client(["x"], "end_turn")
+        _stream_generation(client, "sys", "ctx")
+        assert client.messages.stream.call_args.kwargs["model"] == settings.synthesis_model
 
 
 # ---- TestOutputValidation ----

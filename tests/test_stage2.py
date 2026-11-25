@@ -548,13 +548,13 @@ class TestGreetingNode:
         profile = _load_profile("relationship_heavy")  # involuntary departure
         state = _make_state(profile=profile)
         result = greeting_node(state)
-        assert "straightforward and comfortable" in result["last_agent_message"]
+        assert "go at your pace" in result["last_agent_message"]
 
     def test_greeting_adapts_tone_for_voluntary(self):
         profile = _load_profile("process_heavy")  # voluntary, no sensitivity
         state = _make_state(profile=profile)
         result = greeting_node(state)
-        assert "real difference" in result["last_agent_message"]
+        assert "Thanks for making the time for this." in result["last_agent_message"]
 
 
 # ---- TestProcessAnswerNode ----

@@ -1,0 +1,466 @@
+# KnowledgeKeeper Stage 2 — objective bank (v2)
+#
+# Replaces ROLE_ORIENTATION_QUESTIONS, BLOCK_QUESTIONS and CLOSING_QUESTIONS.
+# Load into agents/stage2_employee_interview/objectives.py as validated Pydantic models.
+#
+# Fields
+#   id          stable; "<group>.<name>"
+#   goal        what the successor needs to end up knowing
+#   done_when   slots the turn analyst checks; the objective is covered when every applicable slot is filled
+#   opener      suggested first question (the interviewer may rephrase; one ask — a question or a "take me through…" invitation)
+#   technique   see 02-agent-design.md section 4
+#   value       3 = a successor is stuck without it, 2 = saves them weeks, 1 = useful
+#   light       asked when the block runs at light depth
+#   per_entity  repeat for each known entity of this kind; cap = most entities to drill into
+#   seeds       profile fields rendered into the brief's "why_it_matters" / what to look for
+#   sensitive   items default to the restricted section
+#   credit      objectives that this one also satisfies when answered fully
+#
+# Groups "orientation", "core", "undocumented", "sweep" and "close" always run.
+# Block groups run at the depth set by the manager's ranking.
+
+orientation:
+  - id: ori.shape
+    goal: The job as actually done, as opposed to the job description.
+    done_when: [main activities named, rough share of time for each, anything in the job description they do not really do]
+    opener: How would you describe the job as you actually do it — where does your week really go?
+    technique: last_time
+    value: 2
+  - id: ori.rhythm
+    goal: Every recurring duty, at every interval.
+    done_when: [daily or weekly duties, monthly duties, quarterly duties, yearly duties or an explicit none, busy periods and what drives them]
+    opener: What comes round on a schedule — the things that have to happen every week or month whether or not anyone asks?
+    technique: calendar_walk
+    value: 3
+  - id: ori.sole
+    goal: The two or three things nobody else could pick up tomorrow.
+    done_when: [each thing named, why nobody else can do it, who comes closest]
+    opener: What are the things you do that nobody else here could pick up tomorrow?
+    technique: absence
+    value: 3
+    seeds: [undocumented_areas]
+
+core:
+  - id: core.inflight
+    goal: Everything currently mid-stream, with enough to carry on.
+    done_when: [each item named, current state, next action, date it matters by, who else knows about it, where the working files are]
+    opener: What's on your desk right now that will still be unfinished on your last day?
+    technique: pointer
+    value: 3
+    per_entity: {kind: in_flight, cap: 6}
+    seeds: [immediate_risk]
+  - id: core.deadlines
+    goal: Dated commitments in the next 90 days.
+    done_when: [renewals, submissions or filings, reviews or audits, deliveries promised to someone, each with a date and what it needs]
+    opener: Looking three months ahead, which dates does the next person need in their diary from day one?
+    technique: calendar_walk
+    value: 3
+  - id: core.access
+    goal: Access, ownership and admin rights only they hold. Never the credentials themselves.
+    done_when: [each system or account or key or card named, where its credential is kept, who should take it over, anything registered in their own name or personal email]
+    opener: Which accounts, logins or admin rights sit with you alone at the moment?
+    technique: pointer
+    value: 3
+    seeds: [system_access_gaps]
+  - id: core.promises
+    goal: Commitments made verbally to anyone, inside or outside, that are written nowhere.
+    done_when: [who it was made to, what was promised, by when, whether anyone else knows]
+    opener: Is there anything you've agreed with someone — a client, a supplier, a colleague — that exists only as a conversation?
+    technique: last_time
+    value: 3
+  - id: core.first_break
+    goal: What fails first with no handover, and how anyone would notice.
+    done_when: [the thing that fails, how soon, the first visible sign, who would be affected, what stops it]
+    opener: If you were gone tomorrow with no handover, what would go wrong first?
+    technique: absence
+    value: 3
+    seeds: [immediate_risk]
+
+client_stakeholder_relationships:
+  - id: rel.map
+    goal: Who the key people are.
+    done_when: [each person named with organisation and role, what the dealings with them are about]
+    opener: Who are the clients or stakeholders the next person most needs to know?
+    technique: last_time
+    value: 3
+    light: true
+    seeds: [key_external_relationships]
+  - id: rel.each
+    goal: How to work with each key person.
+    done_when: [what they expect, how often and by what channel they are in touch, history or sensitivities to know, what they value most]
+    opener: "Tell me about working with {entity} — what do they expect from whoever sits in your chair?"
+    technique: last_time
+    value: 3
+    light: true
+    per_entity: {kind: person, cap: 4}
+  - id: rel.transition
+    goal: Which relationships are fragile in a handover and what protects them.
+    done_when: [which relationships are at risk, what the successor should do in the first two weeks, who should make the introduction]
+    opener: Which of those relationships would feel the change most when you go?
+    technique: novice_contrast
+    value: 3
+    light: true
+  - id: rel.informal
+    goal: Back-channel contacts that get things done.
+    done_when: [who, what they can unblock, how to approach them]
+    opener: Who do you go to off the record when something needs sorting quickly?
+    technique: last_time
+    value: 2
+  - id: rel.careful
+    goal: Contacts that need careful handling and what works with them.
+    done_when: [who, what makes it delicate, the approach that works, what to avoid]
+    opener: Is there anyone the next person should handle with particular care?
+    technique: critical_incident
+    value: 2
+
+internal_processes_workflows:
+  - id: proc.inventory
+    goal: The list of processes they own.
+    done_when: [each process named, how often it runs, who depends on its output]
+    opener: Which processes are yours — the ones that stop if you stop?
+    technique: calendar_walk
+    value: 3
+    light: true
+    credit: [ori.rhythm]
+  - id: proc.each
+    goal: A walkthrough of each process that a newcomer could follow.
+    done_when: [what triggers it, the steps in order, tools and files used, who hands in and who receives, how they know it is finished, what happens when it does not go to plan]
+    opener: "Take me through the last time you ran {entity}, from the first thing that landed on your desk."
+    technique: last_time
+    value: 3
+    light: true
+    per_entity: {kind: process, cap: 3}
+  - id: proc.docs
+    goal: What is written down, where, and how far to trust it.
+    done_when: [which processes have documentation, where it lives, how out of date it is]
+    opener: Which of these are written down anywhere, and where would the next person find that?
+    technique: pointer
+    value: 2
+    light: true
+  - id: proc.dependence
+    goal: Steps that only work because of their access, contacts or know-how.
+    done_when: [the step, what it depends on, what a successor would need to be given]
+    opener: Are there steps that only work because it's you doing them?
+    technique: absence
+    value: 3
+  - id: proc.failure
+    goal: Where processes break and how to recover.
+    done_when: [where it breaks, the first sign, what they do about it, who to tell]
+    opener: Tell me about a time one of these went wrong — what was the first sign?
+    technique: critical_incident
+    value: 3
+  - id: proc.why
+    goal: Changes they made to inherited processes and the reasons, so nobody undoes them.
+    done_when: [what was changed, why, what would happen if it were changed back]
+    opener: Is there anything you do differently from how it was handed to you?
+    technique: last_time
+    value: 2
+  - id: proc.novice
+    goal: The mistakes a newcomer would make.
+    done_when: [the mistake, why it is easy to make, how to avoid it]
+    opener: What would a capable newcomer get wrong in their first month?
+    technique: novice_contrast
+    value: 2
+
+technical_systems_tools:
+  - id: sys.inventory
+    goal: Every system, tool, spreadsheet and shared mailbox they use.
+    done_when: [each named including minor ones, what it is used for]
+    opener: Which systems and tools do you open in a normal week, including the small ones?
+    technique: calendar_walk
+    value: 3
+    light: true
+  - id: sys.each
+    goal: How each key system is really used.
+    done_when: [what they use it for, anything that is not obvious, who to call when it fails]
+    opener: "What should the next person know about {entity} that took you a while to learn?"
+    technique: novice_contrast
+    value: 2
+    light: true
+    per_entity: {kind: system, cap: 4}
+  - id: sys.quirks
+    goal: Known bugs and the workarounds for them.
+    done_when: [the quirk, when it bites, the workaround]
+    opener: Which of those systems misbehaves, and what do you do when it does?
+    technique: critical_incident
+    value: 3
+    light: true
+  - id: sys.integrations
+    goal: Links between systems, scheduled jobs and anything they set up that keeps running.
+    done_when: [what connects to what, who set it up, what happens if it stops, where the configuration lives]
+    opener: Is anything passing data between those systems that you set up or look after?
+    technique: pointer
+    value: 3
+  - id: sys.automations
+    goal: Scripts, macros, mail rules, templates and shortcuts they built.
+    done_when: [what it does, where it lives, what breaks without it]
+    opener: Have you built anything for yourself — a macro, a rule, a template — that the job now relies on?
+    technique: pointer
+    value: 3
+
+decision_making_logic:
+  - id: dec.recurring
+    goal: The judgement calls that come up regularly.
+    done_when: [each recurring decision named, how often it comes up]
+    opener: Which decisions do you make regularly where there's no rule to follow, only judgement?
+    technique: last_time
+    value: 3
+    light: true
+  - id: dec.each
+    goal: How each judgement call is actually made.
+    done_when: [what they look at, the options, what tips it one way or the other, who they consult]
+    opener: "Think of the last time you had to make the call on {entity} — what did you look at first?"
+    technique: last_time
+    value: 3
+    light: true
+    per_entity: {kind: decision, cap: 3}
+  - id: dec.thresholds
+    goal: The limits of their authority.
+    done_when: [what they decide alone, what they escalate and to whom, any money or risk thresholds]
+    opener: Where's the line between what you decide yourself and what you take upstairs?
+    technique: threshold
+    value: 3
+    light: true
+  - id: dec.highstakes
+    goal: The decision where a mistake costs most.
+    done_when: [the decision, what a wrong call costs, the early warning signs]
+    opener: Which decision in this job is the most expensive to get wrong?
+    technique: critical_incident
+    value: 3
+  - id: dec.rules
+    goal: Rules of thumb, and the always and never of the role.
+    done_when: [each rule, where it came from]
+    opener: What rules of thumb do you work by that you've never written down?
+    technique: novice_contrast
+    value: 2
+  - id: dec.differs
+    goal: Where their practice differs from the rulebook and why.
+    done_when: [the situation, what the rulebook says, what they do, the reason]
+    opener: Is there anywhere you knowingly do it differently from the official way?
+    technique: exception
+    value: 2
+
+team_dynamics_management:
+  - id: team.map
+    goal: Who is on the team and how work moves through it.
+    done_when: [each person and what they do, how work is handed out, regular meetings and what they are for]
+    opener: Who's on the team, and how does work actually move between you?
+    technique: last_time
+    value: 3
+    light: true
+  - id: team.reports
+    goal: What each direct report needs from their next manager. Only when the role has direct reports.
+    done_when: [what they are working on, what they need from a manager, how they like to work, anything promised to them such as a review or training]
+    opener: "What does {entity} need from whoever manages them next?"
+    technique: last_time
+    value: 3
+    light: true
+    sensitive: true
+    per_entity: {kind: person, cap: 5, filter: direct_report}
+    seeds: [direct_reports]
+  - id: team.context
+    goal: Practical working context a new manager needs from day one.
+    done_when: [what to know, why it matters practically]
+    opener: What would help a new manager work well with this team from the first day?
+    technique: novice_contrast
+    value: 2
+    sensitive: true
+  - id: team.transition
+    goal: Who will feel the change most and what helps.
+    done_when: [who, what would help them]
+    opener: Who on the team will feel your leaving most, practically speaking?
+    technique: absence
+    value: 2
+    light: true
+  - id: team.challenge
+    goal: The team's biggest current problem and what has been tried.
+    done_when: [the problem, what has been tried, what they would try next]
+    opener: What's the hardest thing the team is dealing with at the moment?
+    technique: last_time
+    value: 2
+
+supplier_vendor_relationships:
+  - id: sup.map
+    goal: The suppliers that matter and who to talk to.
+    done_when: [each supplier and what they provide, the main contact, who owns the contract]
+    opener: Which suppliers does the next person need to know, and who's your contact at each?
+    technique: last_time
+    value: 3
+    light: true
+  - id: sup.terms
+    goal: Rates or terms agreed informally and not in the contract.
+    done_when: [the supplier, what was agreed, with whom, since when]
+    opener: Has anything been agreed with a supplier that isn't in the paperwork?
+    technique: last_time
+    value: 3
+    light: true
+    credit: [core.promises]
+  - id: sup.dates
+    goal: Renewals, reviews and notice periods coming up.
+    done_when: [the supplier, the date, what has to be decided]
+    opener: Which supplier contracts come up for renewal or review next?
+    technique: calendar_walk
+    value: 3
+    light: true
+    credit: [core.deadlines]
+  - id: sup.each
+    goal: How to get things done with each key supplier.
+    done_when: [how the relationship stands, history worth knowing, who to escalate to]
+    opener: "How do you get the best out of {entity}?"
+    technique: last_time
+    value: 2
+    per_entity: {kind: organisation, cap: 3}
+  - id: sup.performance
+    goal: Supplier problems currently being managed.
+    done_when: [the supplier, the problem, where it has got to]
+    opener: Is any supplier letting you down at the moment?
+    technique: critical_incident
+    value: 2
+
+regulatory_compliance:
+  - id: reg.obligations
+    goal: Which requirements apply to the role and how they are met day to day.
+    done_when: [each requirement, what they do to meet it, where the evidence is kept]
+    opener: Which regulatory or compliance duties sit with this role?
+    technique: calendar_walk
+    value: 3
+    light: true
+  - id: reg.dates
+    goal: Filings, renewals and inspections coming up.
+    done_when: [what is due, when, what it needs]
+    opener: What's the next compliance deadline, and what does it take to meet it?
+    technique: calendar_walk
+    value: 3
+    light: true
+    credit: [core.deadlines]
+  - id: reg.watch
+    goal: Areas being managed carefully or under review.
+    done_when: [the area, why it needs watching, what they do about it]
+    opener: Is there anything on the compliance side you keep a particularly close eye on?
+    technique: critical_incident
+    value: 3
+    light: true
+  - id: reg.docs
+    goal: What relies on their judgement because it is not written down.
+    done_when: [the area, what the judgement is, where any guidance lives]
+    opener: Which parts of that rely on your judgement because nothing's written down?
+    technique: pointer
+    value: 2
+  - id: reg.bodies
+    goal: Contacts at regulators, auditors or other external bodies.
+    done_when: [the body, the contact, how the relationship stands]
+    opener: Do you deal with anyone at a regulator or auditor directly?
+    technique: last_time
+    value: 2
+
+strategic_context:
+  - id: strat.priorities
+    goal: What the business or department is trying to achieve now, as they understand it.
+    done_when: [the priorities, where that understanding comes from]
+    opener: What's the business really trying to get done this year, as you see it?
+    technique: last_time
+    value: 2
+    light: true
+  - id: strat.role_link
+    goal: What this role contributes to those priorities.
+    done_when: [what the role delivers towards each priority]
+    opener: Where does this role make the biggest difference to that?
+    technique: last_time
+    value: 2
+    light: true
+  - id: strat.initiatives
+    goal: Projects or decisions in progress that the successor inherits.
+    done_when: [each initiative, where it has got to, who is driving it, the next decision]
+    opener: Which bigger projects or decisions will the next person walk into the middle of?
+    technique: pointer
+    value: 3
+    light: true
+    credit: [core.inflight]
+  - id: strat.watch
+    goal: Risks or opportunities they see coming.
+    done_when: [what they see, why they think so, what they would do]
+    opener: Is there anything coming down the track that the next person should be ready for?
+    technique: novice_contrast
+    value: 2
+  - id: strat.impact
+    goal: How to have the most impact in the role.
+    done_when: [where to focus, what to leave alone]
+    opener: If the next person wanted to make a real difference in their first six months, where should they put their effort?
+    technique: novice_contrast
+    value: 2
+
+undocumented:
+  - id: und.absence
+    goal: What only surfaces when they are not there.
+    done_when: [what people contacted them about, who, what the answer was]
+    opener: When you've been away, what did people get in touch about?
+    technique: absence
+    value: 3
+  - id: und.justknow
+    goal: Things they do that appear in no document.
+    done_when: [each thing, when it is needed, how to do it]
+    opener: What do you do without thinking that isn't written in any handbook?
+    technique: novice_contrast
+    value: 3
+    seeds: [undocumented_areas]
+  - id: und.shortcuts
+    goal: Unofficial shortcuts and workarounds.
+    done_when: [the shortcut, what it replaces, any risk in using it]
+    opener: Where do you go round the official process because your way works better?
+    technique: exception
+    value: 3
+  - id: und.prevent
+    goal: Past failures they now quietly prevent.
+    done_when: [what went wrong before, what they do now to stop it, how often]
+    opener: Is there something that went badly once that you now quietly make sure never happens again?
+    technique: critical_incident
+    value: 3
+  - id: und.ifthen
+    goal: If-this-then-that rules learned from experience.
+    done_when: [the trigger, the response, the reason]
+    opener: Do you have any "if this happens, always do that" rules?
+    technique: threshold
+    value: 3
+
+sweep:
+  - id: sweep.entities
+    goal: Important people, systems or items that were named but never explained.
+    done_when: [what it is, why it matters to the successor]
+    opener: "You mentioned {entity} earlier — what should the next person know about that?"
+    technique: last_time
+    value: 2
+    per_entity: {kind: any, cap: 5, filter: "importance=high and depth=mentioned"}
+  - id: sweep.threads
+    goal: Open threads.
+    done_when: [the thread explained or dismissed as unimportant]
+    opener: "Earlier you touched on {thread} — is that something the next person needs to know about?"
+    technique: last_time
+    value: 2
+
+close:
+  - id: close.readback
+    goal: The employee confirms or corrects the most important things captured.
+    done_when: [confirmed or corrections recorded]
+    opener: "Here's what I've taken as the most important points. What have I got wrong or left out?"
+    technique: teach_back
+    value: 3
+    # The planner supplies 6–8 bullets: all critical/high in-flight items, deadlines, sole-access
+    # items and the top process. Never the risk register and never anything marked sensitive.
+  - id: close.missed
+    goal: Anything important nobody asked about.
+    done_when: [answered]
+    opener: Is there anything about this job that I haven't asked about and should have?
+    technique: novice_contrast
+    value: 3
+  - id: close.people
+    goal: Who the successor should meet first.
+    done_when: [who, why]
+    opener: Who should the next person sit down with in their first two weeks?
+    technique: last_time
+    value: 2
+  - id: close.advice
+    goal: Their advice, in their own words. This is the one place the pack quotes them.
+    done_when: [answered]
+    opener: What's the one piece of advice you'd give the person taking this on?
+    technique: novice_contrast
+    value: 2

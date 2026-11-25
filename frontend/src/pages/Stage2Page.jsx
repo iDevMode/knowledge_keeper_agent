@@ -21,7 +21,6 @@ export default function Stage2Page() {
     loading,
     sessionComplete,
     currentBlock,
-    riskFlagCount,
     error,
     sendMessage,
     addAgentMessage,
@@ -104,7 +103,6 @@ export default function Stage2Page() {
       loading={loading}
       stage={2}
       currentBlock={currentBlock}
-      riskFlagCount={riskFlagCount}
       sessionComplete={sessionComplete}
       error={error}
       title="Stage 2 — Employee Interview"

@@ -44,7 +44,8 @@ START
       → priority_3_block (full depth — all questions)
       → remaining_selected_blocks (light touch — questions 1-3 only)
       → undocumented_workarounds_block (always full depth)
-  → [phase_3] closing_sequence    ← 4 closing questions always run
+  → [phase_3] closing_sequence    ← 3 closing questions always run; the answer to the last one
+                                    completes the session in the same turn (no reply to a goodbye)
   → session_complete_node
 END
 

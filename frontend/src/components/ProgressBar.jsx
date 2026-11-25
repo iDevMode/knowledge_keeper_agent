@@ -8,7 +8,7 @@ const STAGE1_BLOCKS = [
   { key: 'profile_generation', label: 'Review' },
 ]
 
-export default function ProgressBar({ stage, currentBlock, riskFlagCount }) {
+export default function ProgressBar({ stage, currentBlock }) {
   if (stage === 1) {
     const currentIndex = STAGE1_BLOCKS.findIndex((b) => b.key === currentBlock)
 
@@ -38,21 +38,14 @@ export default function ProgressBar({ stage, currentBlock, riskFlagCount }) {
     )
   }
 
-  // Stage 2: block label + risk flag badge
+  // Stage 2 is the departing employee's own view. It deliberately shows no
+  // risk information: risks are recorded for the manager, and a live count
+  // shown to the person being interviewed undermines candour.
   return (
-    <div className="flex items-center justify-between px-4 py-2">
+    <div className="flex items-center px-4 py-2">
       <span className="text-sm font-medium text-ink-light capitalize">
         {currentBlock ? currentBlock.replace(/_/g, ' ') : 'Starting...'}
       </span>
-      {riskFlagCount > 0 && (
-        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-flag-100 text-flag-600">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
-            <line x1="4" y1="22" x2="4" y2="15" />
-          </svg>
-          {riskFlagCount} {riskFlagCount === 1 ? 'flag' : 'flags'}
-        </span>
-      )}
     </div>
   )
 }

@@ -310,11 +310,16 @@ class TestSessionStatus:
         )
         session_id = create_resp.json()["session_id"]
 
-        response = client.get(f"/api/sessions/{session_id}/status")
-        data = response.json()
-        assert data["stage"] == 2
-        assert "risk_flag_count" in data
-        assert isinstance(data["risk_flag_count"], int)
+        manager = client.get(
+            f"/api/sessions/{session_id}/status",
+            headers={"Authorization": f"Bearer {client.manager_token}"},
+        ).json()
+        assert manager["stage"] == 2
+        assert isinstance(manager["risk_flag_count"], int)
+
+        employee = client.get(f"/api/sessions/{session_id}/status").json()
+        assert employee["stage"] == 2
+        assert employee.get("risk_flag_count") is None
 
     def test_rejects_unauthenticated_caller(self, client):
         response = client.get("/api/sessions/nonexistent/status")

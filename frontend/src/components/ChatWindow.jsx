@@ -10,7 +10,6 @@ export default function ChatWindow({
   loading,
   stage,
   currentBlock,
-  riskFlagCount,
   sessionComplete,
   title,
   // Rendered by ChatWindow itself rather than passed through `children`.
@@ -44,7 +43,6 @@ export default function ChatWindow({
         <ProgressBar
           stage={stage}
           currentBlock={currentBlock}
-          riskFlagCount={riskFlagCount}
         />
       )}
 

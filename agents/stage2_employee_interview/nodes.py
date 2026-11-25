@@ -9,12 +9,14 @@ from agents.parsing import ClassifierParseError, extract_json
 from agents.text_utils import enforce_single_question, validate_single_question
 from agents.stage2_employee_interview.prompts import (
     BLOCK_QUESTIONS,
+    CLASSIFIER_FORMAT_REMINDER,
     CLOSING_MESSAGE,
     CLOSING_QUESTIONS,
-    RISK_FLAG_CLASSIFIER_PROMPT_TEMPLATE,
     ROLE_ORIENTATION_QUESTIONS,
     SINGLE_QUESTION_REPROMPT,
+    build_followup_classifier_prompt,
     build_greeting_message,
+    build_risk_classifier_prompt,
     build_system_prompt,
 )
 from agents.stage2_employee_interview.state import Stage2State
@@ -37,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def _get_primary_llm() -> ChatAnthropic:
     return ChatAnthropic(
-        model=settings.primary_model,
+        model=settings.interviewer_model,
         api_key=settings.anthropic_api_key,
         max_tokens=2048,
     )
@@ -45,7 +47,7 @@ def _get_primary_llm() -> ChatAnthropic:
 
 def _get_classifier_llm() -> ChatAnthropic:
     return ChatAnthropic(
-        model=settings.classifier_model,
+        model=settings.analyst_model,
         api_key=settings.anthropic_api_key,
         max_tokens=512,
     )
@@ -77,6 +79,40 @@ def _single_question_or_retry(llm, messages, response_text: str, session_id: str
         session_id,
     )
     return enforce_single_question(retried)
+
+
+def _invoke_classifier(llm, prompt: str, expect: type, session_id: str, name: str):
+    """Call a classifier and parse its JSON, retrying once with a format reminder.
+
+    CLAUDE.md: retry once with an explicit format instruction before giving up.
+    An unreadable first response used to be treated exactly like "no follow-up"
+    or "no risks", silently losing both.
+
+    Raises:
+        ClassifierParseError: if neither response parses to `expect`.
+    """
+    messages = [HumanMessage(content=prompt)]
+    response = llm.invoke(messages)
+    try:
+        result = extract_json(response.content)
+        if not isinstance(result, expect):
+            raise ClassifierParseError(f"expected {expect.__name__}, got {type(result).__name__}")
+        return result
+    except ClassifierParseError as first_error:
+        logger.warning(
+            "session=%s stage=2 %s classifier response unparseable (%s) — retrying once",
+            session_id, name, first_error,
+        )
+
+    retry = llm.invoke([
+        *messages,
+        AIMessage(content=str(response.content)),
+        HumanMessage(content=CLASSIFIER_FORMAT_REMINDER),
+    ])
+    result = extract_json(retry.content)
+    if not isinstance(result, expect):
+        raise ClassifierParseError(f"expected {expect.__name__}, got {type(result).__name__}")
+    return result
 
 
 def load_profile_node(state: Stage2State) -> Dict[str, Any]:
@@ -256,27 +292,16 @@ def risk_flag_classifier_node(state: Stage2State) -> Dict[str, Any]:
     if not last_human:
         return {}
 
-    prompt = RISK_FLAG_CLASSIFIER_PROMPT_TEMPLATE.format(
-        block=block,
-        question_index=index,
-        question=last_ai or "",
-        answer=last_human,
-    )
+    prompt = build_risk_classifier_prompt(block, index, last_ai or "", last_human)
 
     try:
         llm = _get_classifier_llm()
-        response = llm.invoke([HumanMessage(content=prompt)])
-
-        flags_data = extract_json(response.content)
-        if not isinstance(flags_data, list):
-            logger.warning(
-                "session=%s stage=2 risk classifier returned %s, expected a list "
-                "— treating as no flags", session_id, type(flags_data).__name__,
-            )
-            flags_data = []
+        flags_data = _invoke_classifier(llm, prompt, list, session_id, "risk")
 
         new_flags = []
         for flag_data in flags_data:
+            if not isinstance(flag_data, dict):
+                continue
             flag = RiskFlag(
                 flag_type=flag_data["flag_type"],
                 severity=flag_data["severity"],
@@ -349,35 +374,11 @@ def followup_classifier_node(state: Stage2State) -> Dict[str, Any]:
     if not last_human or not last_ai:
         return {"pending_followup": None}
 
-    classifier_prompt = f"""\
-You are a follow-up classifier. Given a question and answer from an employee knowledge extraction \
-interview, decide whether a follow-up question is needed.
-
-A follow-up is needed when:
-- The answer is vague or generic
-- The answer hints at something deeper that wasn't fully explained
-- Key details are missing that would be important for the handover
-
-A follow-up is NOT needed when:
-- The answer is clear and substantive
-- The person said "I don't know" (respect that and move on)
-- The answer is a straightforward factual response
-
-Question asked: {last_ai}
-
-Answer received: {last_human}
-
-Respond with ONLY a JSON object (no markdown, no explanation):
-{{"needs_followup": true/false, "reason": "brief reason", "suggested_followup": "the follow-up question to ask if needed"}}
-"""
+    classifier_prompt = build_followup_classifier_prompt(last_ai, last_human)
 
     try:
         llm = _get_classifier_llm()
-        response = llm.invoke([HumanMessage(content=classifier_prompt)])
-        result = extract_json(response.content)
-
-        if not isinstance(result, dict):
-            raise ClassifierParseError(f"expected a JSON object, got {type(result).__name__}")
+        result = _invoke_classifier(llm, classifier_prompt, dict, session_id, "followup")
 
         if result.get("needs_followup", False):
             return {"pending_followup": result.get("suggested_followup", "")}

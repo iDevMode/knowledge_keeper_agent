@@ -11,6 +11,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from langchain_core.messages import AIMessage
+
 import pytest
 from tests.api_client import AuthedTestClient
 
@@ -294,17 +296,33 @@ class TestStage2RiskFlags:
 
         assert _state(session_id)["risk_flags"] == []
 
-    def test_status_endpoint_reports_risk_flag_count(self, client):
+    def test_status_reports_risk_flag_count_to_the_manager(self, client):
         with _stage2_llms(detect_risk=True):
             session_id, _ = _start_stage2(client)
             client.post(
                 f"/api/sessions/{session_id}/message", json={"message": "Only I can do it."}
             )
 
-            status = client.get(f"/api/sessions/{session_id}/status").json()
+            status = client.get(
+                f"/api/sessions/{session_id}/status",
+                headers={"Authorization": f"Bearer {client.manager_token}"},
+            ).json()
 
         assert status["risk_flag_count"] >= 1
         assert status["stage"] == 2
+
+    def test_status_never_reports_risk_flags_to_the_employee(self, client):
+        """The employee's page showed a live risk badge during their own interview."""
+        with _stage2_llms(detect_risk=True):
+            session_id, _ = _start_stage2(client)
+            client.post(
+                f"/api/sessions/{session_id}/message", json={"message": "Only I can do it."}
+            )
+            # The session's own token is the employee's.
+            status = client.get(f"/api/sessions/{session_id}/status").json()
+
+        assert _state(session_id)["risk_flags"], "precondition: a flag was recorded"
+        assert status.get("risk_flag_count") is None
 
 
 class TestFollowUpLoop:
@@ -431,3 +449,59 @@ class TestFollowUpLoop:
             "The Dutch one needs a manual FX correction.",
         ]:
             assert message in transcript, f"{message!r} was lost before Stage 3"
+
+
+class TestInterviewEndsOnTheLastRealAnswer:
+    """Regression guard: the session used to need a reply to the goodbye.
+
+    The closing sequence ended with a pseudo-question, "Thank them genuinely and
+    close the session". Every asked item waits for a reply, so Stage 3 only
+    started after the employee answered the thank-you; anyone who closed the tab
+    there produced no pack, and anyone who replied was thanked twice.
+    """
+
+    def test_every_closing_item_is_a_question(self):
+        from agents.stage2_employee_interview.prompts import CLOSING_QUESTIONS
+
+        assert len(CLOSING_QUESTIONS) == STAGE2_CLOSING_QUESTION_COUNT
+        for item in CLOSING_QUESTIONS:
+            assert "?" in item, f"closing item is not a question: {item!r}"
+
+    def test_answer_to_last_closing_question_completes_with_one_goodbye(self, client):
+        from agents.stage2_employee_interview.prompts import CLOSING_MESSAGE
+
+        with _stage2_llms():
+            session_id, _ = _start_stage2(client)
+            last = None
+            for turn in range(1, MAX_TURNS + 1):
+                last = client.post(
+                    f"/api/sessions/{session_id}/message",
+                    json={"message": f"Detailed answer number {turn} about the process."},
+                ).json()
+                if last["session_complete"]:
+                    break
+
+        state = _state(session_id)
+        assert last["session_complete"] is True
+        assert last["message"] == CLOSING_MESSAGE
+        # The last answer on record is the reply to the final real closing
+        # question — nothing was asked after it.
+        closing = sorted(k for k in state["answers"] if k.startswith("closing_sequence."))
+        assert closing[-1] == f"closing_sequence.{STAGE2_CLOSING_QUESTION_COUNT - 1}"
+        goodbyes = [
+            m for m in state["conversation_history"]
+            if isinstance(m, AIMessage) and m.content == CLOSING_MESSAGE
+        ]
+        assert len(goodbyes) == 1
+
+    def test_checkpoint_already_at_the_old_thank_you_still_completes(self):
+        """A session mid-goodbye when this deploys must finish, not loop."""
+        from agents.stage2_employee_interview.nodes import advance_question_node
+
+        result = advance_question_node({
+            "session_id": "s",
+            "current_phase": "closing_sequence",
+            "current_block": "closing_sequence",
+            "current_question_index": 3,  # the removed fourth item
+        })
+        assert result["current_block"] == "__complete__"

@@ -50,8 +50,9 @@ The full prompt content for all three stages is documented in:
 `knowledge-extraction-agent-prompt_1.md` (repo root)
 
 Key prompt construction rules:
-- Stage 2 system prompt is assembled at session start by injecting the serialised Role Intelligence Profile into the base prompt template
-- Agent instruction flags from the profile are appended as a `## BEHAVIOURAL INSTRUCTIONS FOR THIS SESSION` block at the end of the Stage 2 system prompt
+- Stage 2 system prompt is assembled by injecting the **whole** Role Intelligence Profile as a role brief (`agents/stage2_employee_interview/role_brief.py`), plus true facts about the process (who gets the pack, retention, skip/pause) so the interviewer can answer the employee's questions
+- Session behaviour (tone, depth, overlap, time) is derived **in code** from the profile's structured fields and appended as `## SETTINGS FOR THIS SESSION`. The free-text `agent_flags` the Stage 1 model writes are no longer injected into the Stage 2 prompt — they were unreviewable model output from one session becoming instructions in another. Stage 1 still generates them and shows them in the profile review
+- Employee text inside classifier prompts is wrapped with `wrap_untrusted()` and labelled as data, never pasted in raw
 - Block question lists are injected as the relevant block node is entered — not all at once at session start
 
 ---
@@ -112,6 +113,12 @@ Relying on the main model to self-decide when to follow up creates inconsistency
 
 **Why generate Stage 3 in a single call rather than section by section?**
 Cross-referencing between sections (e.g. a risk flag in Section 2 referencing a relationship in Section 5) requires the full context to be present at generation time. Section-by-section generation loses this coherence.
+
+**How are secrets kept out of the record?**
+Every interview message passes through `agents/redaction.py` in `POST /api/sessions/{id}/message` *before* it enters graph state, so a typed password never reaches the checkpoint, the answer store, the Stage 3 prompt or the emailed pack. It catches labelled values ("password is X" where X has a digit, symbol or inner capital), PEM private keys, well-known token formats and long high-entropy strings; paths, URLs, emails and ordinary sentences about passwords are left alone. When something is removed, a fixed notice telling the employee to change it is prepended to the agent's reply in code, so it is always said. The interviewer prompt also forbids asking for credentials.
+
+**Which model does what?**
+`config/settings.py`: `INTERVIEWER_MODEL` (Stage 2 questions, default Sonnet 5.5), `ANALYST_MODEL` (Stage 2 follow-up and risk classifiers, default Haiku 5.5), `SYNTHESIS_MODEL` (Stage 3, default Opus 5.5), `PRIMARY_MODEL` / `CLASSIFIER_MODEL` (Stage 1). An unset per-job variable falls back to `PRIMARY_MODEL` / `CLASSIFIER_MODEL` when those are set, so older deployments keep their models. Stage 3 checks the stream's `stop_reason` and fails with `GenerationTruncatedError` unless the model finished, because a truncated pack can still contain every section marker.
 
 **Why Postgres for session state between stages, rather than Redis?**
 The gap between Stage 1 and Stage 2 could be hours or days (the manager completes Stage 1, then shares the link with the employee), so the state has to outlive the process — a redeploy in that window must not destroy an in-flight interview. Redis was the original plan, but LangGraph's `RedisSaver.setup()` issues `FT._LIST`, a RediSearch command: it requires Redis Stack, not the plain Redis addon a managed platform gives you, and it fails at startup with `ResponseError: unknown command 'ft._list'`. Postgres already had to be in the stack for durable documents and cross-worker locking, so everything now lives there: sessions and profiles (`kk_sessions`, `kk_profiles`, `kk_session_links`), LangGraph checkpoints (`PostgresSaver`), generated documents as bytes (`kk_documents`), and `pg_advisory_lock` to serialise a session's graph run across workers. TTL is enforced by an expiry sweep rather than by the store. When `DATABASE_URL` is unset the app falls back to in-memory equivalents — fine for tests and local runs, fatal at startup outside development. See `api/postgres_store.py`.

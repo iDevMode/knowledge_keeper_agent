@@ -18,6 +18,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
+from agents.redaction import REDACTION_NOTICE, redact_secrets
 from agents.stage1_business_interview.graph import build_stage1_graph
 from agents.stage2_employee_interview.graph import build_stage2_graph
 from agents.stage3_document_generation.generator import GenerationRequest, generate_document
@@ -982,10 +983,22 @@ def send_message(session_id: str, request: SendMessageRequest):
         if snapshot.values.get("session_complete"):
             raise HTTPException(status_code=400, detail="Session is already complete")
 
-        state = _run_graph_resume(instance, request.message)
+        # Before the message touches graph state: once checkpointed, a typed
+        # password would reach the answer store, the Stage 3 prompt and the
+        # emailed pack. See agents/redaction.py.
+        redaction = redact_secrets(request.message)
+        if redaction.redacted:
+            logger.warning(
+                "session=%s stage=%s redacted %d secret(s) from a message",
+                session_id, instance.stage, redaction.count,
+            )
+        state = _run_graph_resume(instance, redaction.text)
 
     agent_message = state.get("last_agent_message", "")
     session_complete = state.get("session_complete", False)
+    if redaction.redacted:
+        # Said in code rather than left to the model, so it is always said.
+        agent_message = f"{REDACTION_NOTICE}\n\n{agent_message}"
 
     response = MessageResponse(message=agent_message, session_complete=session_complete)
 
@@ -1077,7 +1090,12 @@ def get_session_status(
         response.session_complete = state.get("session_complete", False)
         response.last_agent_message = state.get("last_agent_message") or None
 
-        if instance.stage == 2:
+        # Manager only. The employee's own interview page used to show a live
+        # "N flags" badge — risks recorded about their departure while they
+        # were still answering — which undercuts the candour the interview
+        # depends on and contradicts "nothing you say will be used to evaluate
+        # you".
+        if instance.stage == 2 and claims.is_manager:
             risk_flags = state.get("risk_flags", [])
             response.risk_flag_count = len(risk_flags)
 

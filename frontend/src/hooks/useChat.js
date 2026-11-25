@@ -7,7 +7,6 @@ export default function useChat(sessionId) {
   const [sessionComplete, setSessionComplete] = useState(false)
   const [profile, setProfile] = useState(null)
   const [currentBlock, setCurrentBlock] = useState(null)
-  const [riskFlagCount, setRiskFlagCount] = useState(0)
   const [error, setError] = useState(null)
 
   const addAgentMessage = useCallback((content) => {
@@ -49,9 +48,6 @@ export default function useChat(sessionId) {
         try {
           const status = await getSessionStatus(sessionId)
           setCurrentBlock(status.current_block)
-          if (status.risk_flag_count != null) {
-            setRiskFlagCount(status.risk_flag_count)
-          }
         } catch {
           // Non-critical — don't block chat for status failures
         }
@@ -87,7 +83,6 @@ export default function useChat(sessionId) {
     sessionComplete,
     profile,
     currentBlock,
-    riskFlagCount,
     error,
     sendMessage,
     addAgentMessage,

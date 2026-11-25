@@ -94,7 +94,7 @@ def main():
     )
 
     print(f"\nContext length: {len(context)} chars")
-    print(f"Calling Claude ({settings.primary_model}) via streaming...", flush=True)
+    print(f"Calling Claude ({settings.synthesis_model}) via streaming...", flush=True)
     print()
 
     # Use streaming to keep the connection alive
@@ -111,7 +111,7 @@ def main():
     print(flush=True)
 
     with client.messages.stream(
-        model=settings.primary_model,
+        model=settings.synthesis_model,
         max_tokens=8192,
         system=STAGE3_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": context}],
