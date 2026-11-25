@@ -305,3 +305,129 @@ class TestStage2RiskFlags:
 
         assert status["risk_flag_count"] >= 1
         assert status["stage"] == 2
+
+
+class TestFollowUpLoop:
+    """The follow-up loop, driven through the real graph with a classifier that
+    always asks for another follow-up.
+
+    Two properties are at stake and neither held before. The follow-up cap could
+    never bind, because `process_answer_node` reset `followup_count` on the
+    answer *to* a follow-up as well as the first answer to a question — with a
+    classifier like this one the interview never left the first question. And
+    each follow-up answer overwrote the one before it under the same
+    `block.index` key, so the substance of an exchange never reached Stage 3.
+    """
+
+    @staticmethod
+    def _always_followup_llms():
+        """Classifier that asks for a follow-up every single time."""
+        stack = ExitStack()
+
+        classifier = MagicMock()
+
+        def respond(messages):
+            prompt = messages[0].content
+            response = MagicMock()
+            if "risk flag classifier" in prompt:
+                response.content = "[]"
+            else:
+                response.content = json.dumps({
+                    "needs_followup": True,
+                    "reason": "always probing",
+                    "suggested_followup": "Can you say more about that?",
+                })
+            return response
+
+        classifier.invoke.side_effect = respond
+
+        stack.enter_context(
+            patch("agents.stage2_employee_interview.nodes._get_primary_llm",
+                  return_value=_make_primary())
+        )
+        stack.enter_context(
+            patch("agents.stage2_employee_interview.nodes._get_classifier_llm",
+                  return_value=classifier)
+        )
+        return stack
+
+    def test_the_follow_up_cap_binds_and_the_interview_advances(self, client):
+        from config.constants import MAX_FOLLOWUPS_PER_QUESTION
+
+        # One original answer plus the cap, for each of the first two questions,
+        # plus one more turn to show the second question is reached at all.
+        turns = 2 * (1 + MAX_FOLLOWUPS_PER_QUESTION) + 1
+
+        with self._always_followup_llms():
+            session_id, _ = _start_stage2(client)
+            for turn in range(turns):
+                res = client.post(
+                    f"/api/sessions/{session_id}/message",
+                    json={"message": f"Answer {turn}."},
+                )
+                assert res.status_code == 200, res.text
+
+        answers = _state(session_id)["answers"]
+
+        assert "role_orientation.1" in answers, (
+            "the interview never left the first question — the follow-up cap did "
+            f"not bind; keys were {sorted(answers)}"
+        )
+        assert len(answers["role_orientation.0"]) == 1 + MAX_FOLLOWUPS_PER_QUESTION, (
+            f"expected the original answer plus {MAX_FOLLOWUPS_PER_QUESTION} "
+            f"follow-ups, got {answers['role_orientation.0']}"
+        )
+
+    def test_the_cap_resets_for_each_new_question(self, client):
+        """Moving the reset out of `process_answer_node` must not lose it.
+
+        `ask_question_node` and `advance_question_node` own it now, so the
+        second question gets its own full follow-up budget rather than
+        inheriting an exhausted counter and being advanced past immediately.
+        """
+        from config.constants import MAX_FOLLOWUPS_PER_QUESTION
+
+        turns = 2 * (1 + MAX_FOLLOWUPS_PER_QUESTION)
+
+        with self._always_followup_llms():
+            session_id, _ = _start_stage2(client)
+            for turn in range(turns):
+                client.post(
+                    f"/api/sessions/{session_id}/message",
+                    json={"message": f"Answer {turn}."},
+                )
+
+        answers = _state(session_id)["answers"]
+        assert len(answers["role_orientation.1"]) == 1 + MAX_FOLLOWUPS_PER_QUESTION, (
+            f"second question did not get a fresh follow-up budget: "
+            f"{answers['role_orientation.1']}"
+        )
+
+    def test_every_follow_up_answer_survives_into_the_stage3_transcript(self, client):
+        """The end the fix exists for: the words reach the document generator."""
+        from agents.stage3_document_generation.prompts import _format_answers_by_block
+
+        with self._always_followup_llms():
+            session_id, _ = _start_stage2(client)
+            for message in [
+                "I run the reconciliation macro.",
+                "It pulls three bank statements.",
+                "Premier, Lloyds and the Dutch one.",
+                "The Dutch one needs a manual FX correction.",
+            ]:
+                client.post(
+                    f"/api/sessions/{session_id}/message", json={"message": message}
+                )
+
+        state = _state(session_id)
+        transcript = _format_answers_by_block(
+            state["answers"], state["block_order"], state["block_depths"]
+        )
+
+        for message in [
+            "I run the reconciliation macro.",
+            "It pulls three bank statements.",
+            "Premier, Lloyds and the Dutch one.",
+            "The Dutch one needs a manual FX correction.",
+        ]:
+            assert message in transcript, f"{message!r} was lost before Stage 3"
